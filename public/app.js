@@ -108,7 +108,10 @@ function slotGrid(client, chain, currentSlot, epochsShown) {
     const slots = el('div', 'slots');
     for (let index = 0; index < slotsPerEpoch; index += 1) {
       const slot = epoch * slotsPerEpoch + index;
-      const cell = el('div', 'slot');
+      const cell = el('a', 'slot');
+      cell.href = `https://beaconcha.in/slot/${slot}`;
+      cell.target = '_blank';
+      cell.rel = 'noopener noreferrer';
 
       if (slot > currentSlot) {
         // leave as future
@@ -123,7 +126,7 @@ function slotGrid(client, chain, currentSlot, epochsShown) {
       }
 
       if (slot === currentSlot) cell.classList.add('current');
-      cell.title = `slot ${slot} · epoch ${epoch}`;
+      cell.title = `slot ${slot} · epoch ${epoch}\n(click to open on beaconcha.in)`;
       slots.append(cell);
     }
     row.append(slots);

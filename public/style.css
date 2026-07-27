@@ -400,11 +400,23 @@ main {
 }
 
 .slot {
+  display: block;
   width: 11px;
   height: 15px;
   border-radius: 2px;
   background: var(--bg-inset);
   border: 1px solid var(--border-soft);
+  cursor: pointer;
+  transition:
+    transform 90ms ease,
+    box-shadow 90ms ease;
+}
+
+.slot:hover,
+.slot:focus-visible {
+  transform: scale(1.25);
+  box-shadow: 0 0 0 1px var(--text);
+  outline: none;
 }
 
 .slot.finalized {
