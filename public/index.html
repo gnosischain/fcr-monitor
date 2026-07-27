@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>FCR Monitor</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark"></span>
+        <h1>FCR Monitor</h1>
+        <span class="brand-sub">fast confirmation rule &middot; reorg watch</span>
+      </div>
+      <div class="topbar-meta">
+        <div class="meta-item"><span class="meta-label">slot</span><span id="current-slot">&mdash;</span></div>
+        <div class="meta-item"><span class="meta-label">epoch</span><span id="current-epoch">&mdash;</span></div>
+        <div class="meta-item">
+          <span class="meta-label">updated</span><span id="last-update">&mdash;</span>
+        </div>
+      </div>
+    </header>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab active" role="tab" data-tab="fcr" aria-selected="true">FCR monitoring</button>
+      <button class="tab" role="tab" data-tab="reorg" aria-selected="false">
+        Reorg <span class="tab-badge" id="reorg-badge" hidden>0</span>
+      </button>
+      <button class="tab" role="tab" data-tab="reference" aria-selected="false">Reference</button>
+    </nav>
+
+    <main>
+      <section id="panel-fcr" class="panel active" role="tabpanel">
+        <div id="divergence-banner" class="banner banner-alert" hidden></div>
+        <div id="clients" class="clients"></div>
+        <div id="planned" class="planned"></div>
+        <div class="legend">
+          <span class="legend-item"><i class="swatch swatch-finalized"></i>finalized</span>
+          <span class="legend-item"><i class="swatch swatch-safe"></i>safe (fast-confirmed)</span>
+          <span class="legend-item"><i class="swatch swatch-proposed"></i>proposed, not yet safe</span>
+          <span class="legend-item"><i class="swatch swatch-pending"></i>slot passed, no block seen</span>
+          <span class="legend-item"><i class="swatch swatch-future"></i>future slot</span>
+        </div>
+      </section>
+
+      <section id="panel-reorg" class="panel" role="tabpanel">
+        <div id="reorg-content"></div>
+      </section>
+
+      <section id="panel-reference" class="panel" role="tabpanel">
+        <article class="reference">
+          <h2>Why this dashboard exists</h2>
+          <p>
+            Gnosis Chain canonical bridges are integrating the fast confirmation rule as a block
+            processing rule, allowing bridging time to be much faster. This dashboard serves as
+            public information and for monitoring.
+          </p>
+          <p class="reference-aside">
+            It watches whether any block confirmed under the fast confirmation rule is later
+            reorged out &mdash; the failure mode that faster bridging depends on not happening.
+          </p>
+
+          <h3>Links</h3>
+          <ul class="reference-links">
+            <li>
+              <a
+                href="https://docs.gnosischain.com/bridges/fast-confirmation-rule"
+                target="_blank"
+                rel="noopener noreferrer"
+                >Fast confirmation rule documentation</a
+              >
+              <span>docs.gnosischain.com</span>
+            </li>
+            <li>
+              <a href="https://bridge.gnosischain.com/" target="_blank" rel="noopener noreferrer"
+                >Gnosis Chain bridge</a
+              >
+              <span>bridge.gnosischain.com &mdash; to bridge</span>
+            </li>
+            <li>
+              <a href="https://eez.io/" target="_blank" rel="noopener noreferrer">EEZ</a>
+              <span>eez.io &mdash; Ethereum Economic Zone</span>
+            </li>
+          </ul>
+        </article>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span id="footer-status">connecting&hellip;</span>
+      <span class="footer-sep">&middot;</span>
+      <span>polling every <span id="poll-interval">&mdash;</span>s</span>
+      <!-- /metrics stays live for Prometheus to scrape; it is just not linked here. -->
+    </footer>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

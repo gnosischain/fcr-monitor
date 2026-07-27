@@ -1,0 +1,51 @@
+groups:
+  - name: fcr
+    rules:
+      - alert: FcrReorgDetected
+        expr: increase(fcr_reorgs_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Reorg past the fast confirmation rule on {{ $labels.client }}"
+          description: "{{ $labels.type }} detected on {{ $labels.client }}. See the Reorg tab on the monitor."
+
+      - alert: FcrClientDown
+        expr: fcr_client_up == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.client }} execution RPC unreachable"
+
+      - alert: FcrClientDivergence
+        expr: fcr_client_divergence == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Nimbus and Lodestar disagree on the {{ $labels.tag }} block hash"
+
+      - alert: FcrSafeStalled
+        expr: fcr_block_age_seconds{tag="safe"} > 120
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Safe block on {{ $labels.client }} has not advanced for over two minutes"
+
+      - alert: FcrFinalizationStalled
+        expr: fcr_block_age_seconds{tag="finalized"} > 900
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Finalization on {{ $labels.client }} is more than 15 minutes behind"
+
+      - alert: FcrMonitorStale
+        expr: time() - fcr_last_poll_timestamp_seconds > 60
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Monitor has not completed a poll of {{ $labels.client }} in over a minute"
