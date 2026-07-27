@@ -88,7 +88,9 @@ silently shorten the window the "no reorg since X" claim covers.
 ## Running it
 
 ```bash
-cp .env.example .env     # fill in the two RPC URLs
+cp .env.example .env                                  # fill in the two RPC URLs
+cp alertmanager/slack_url.example alertmanager/slack_url   # paste your Slack webhook
+chmod 600 alertmanager/slack_url
 docker compose up -d --build
 ```
 
@@ -97,6 +99,7 @@ docker compose up -d --build
 | dashboard | `127.0.0.1:3000` | two tabs: FCR monitoring, Reorg |
 | Prometheus | `127.0.0.1:9090` | scrapes the monitor's `/metrics` |
 | Grafana | `127.0.0.1:3001` | dashboard "FCR Monitor" pre-provisioned |
+| Alertmanager | `127.0.0.1:9093` | routes the reorg alert to Slack |
 | Redis | not published | reachable only on the compose network |
 
 Every published port is bound to loopback, so nothing is reachable from outside
@@ -107,6 +110,48 @@ ssh -L 3000:localhost:3000 -L 3001:localhost:3001 <host>
 ```
 
 ---
+
+## Slack alerting
+
+Create an incoming webhook in Slack (app → Incoming Webhooks → add to the target
+channel) and put the URL in `alertmanager/slack_url`. That file is the
+credential — anyone holding it can post to the channel — so it is gitignored and
+read via `slack_api_url_file` rather than inlined into the config.
+
+**Only `FcrReorgDetected` reaches Slack.** Every other rule in
+`prometheus/alerts.yml` still evaluates and is visible at `:9090/alerts`, but
+Alertmanager's default route is a receiver with no notifiers attached, so those
+alerts stop there. Making one of them notify is a matter of adding a route.
+
+The message names the offending block:
+
+```
+🔴 Reorg past the fast confirmation rule — nimbus
+finalized_mismatch on nimbus at block 23456789
+• block     23456789
+• recorded  0xaaaa1111…bbbb8888
+• actual    0x9999ffff…22221111
+```
+
+Those three fields come from `fcr_reorg_info`, a gauge set to 1 for
+`REORG_ANNOUNCE_SECONDS` (default 900) after detection, carrying the block on
+its labels. It is deliberately short-lived and capped at `REORG_ANNOUNCE_MAX`
+(default 20) concurrent series: hashes as label values are unbounded
+cardinality, so the announcement lives just long enough to alert. The permanent
+record is `fcr_reorgs_total` and the Redis history behind the Reorg tab.
+Announcements still inside their window are re-published on restart.
+
+There is no resolved notification — the announcement expiring means the alerting
+window closed, not that the reorg was undone.
+
+To check the wiring without waiting for a real reorg:
+
+```bash
+docker compose exec alertmanager amtool --alertmanager.url=http://localhost:9093 \
+  alert add alertname=FcrReorgDetected client=nimbus type=finalized_mismatch \
+  block_number=1 recorded_hash=0xaaa observed_hash=0xbbb \
+  --annotation='summary=pipe test'
+```
 
 ## Keeping the execution RPC private
 
@@ -147,13 +192,15 @@ Beyond that:
 | `fcr_block_age_seconds` | `client`, `tag` | wall-clock age; a rising `safe` means confirmation stalled |
 | `fcr_lag_blocks` | `client`, `tag` | distance behind head |
 | `fcr_reorgs_total` | `client`, `type` | counter per detection type |
+| `fcr_reorg_info` | `client`, `type`, `block_number`, `recorded_hash`, `observed_hash` | 1 while a recent reorg is being announced; what the Slack alert reads |
 | `fcr_client_divergence` | `tag` | 1 when the two clients disagree |
 | `fcr_client_up` | `client` | RPC reachability |
 | `fcr_tracked_safe_blocks` | `client` | safe blocks awaiting finalization |
 | `fcr_walk_truncated_total` | `client`, `phase` | coverage gaps from hitting `MAX_WALK_BLOCKS` |
 
-Alert rules for all of these are in `prometheus/alerts.yml`. They fire into
-Prometheus; wire an Alertmanager to them to get notifications off the box.
+Alert rules for all of these are in `prometheus/alerts.yml`. All of them
+evaluate; only the reorg alert is routed to Slack — see [Slack
+alerting](#slack-alerting).
 
 ---
 

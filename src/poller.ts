@@ -3,6 +3,7 @@ import { getBlockByHash, getBlockByTag, RpcError, type BlockHeader, type BlockTa
 import {
   countSafeBlocks,
   getAllSafeBlocks,
+  getReorgs,
   getSafeBlock,
   loadSnapshot,
   pruneSafeBlocksUpTo,
@@ -14,6 +15,7 @@ import {
   type ReorgType,
 } from './store.js';
 import {
+  announceReorg,
   blockAgeGauge,
   blockNumberGauge,
   blockSlotGauge,
@@ -24,6 +26,7 @@ import {
   reorgCounter,
   rpcDuration,
   rpcErrorCounter,
+  sweepReorgAnnouncements,
   trackedSafeGauge,
   walkTruncatedCounter,
 } from './metrics.js';
@@ -299,6 +302,19 @@ class ClientPoller {
     };
     await pushReorg(event);
     reorgCounter.inc({ client: this.client.id, type: input.type });
+    announceReorg(
+      {
+        client: event.client,
+        type: event.type,
+        blockNumber: event.blockNumber,
+        recordedHash: event.recordedSafeHash,
+        observedHash: event.observedHash,
+        detectedAt: event.detectedAt,
+      },
+      config.reorgAnnounceSeconds,
+      config.reorgAnnounceMax,
+      detectedAt,
+    );
     console.error(`[REORG][${this.client.id}][${input.type}] ${input.note}`);
   }
 }
@@ -314,8 +330,35 @@ export class Monitor {
 
   async start(): Promise<void> {
     await Promise.all(this.pollers.map((poller) => poller.restore()));
+    await this.restoreAnnouncements();
     await this.tick();
     this.timer = setInterval(() => void this.tick(), config.pollIntervalMs);
+  }
+
+  /**
+   * Re-publishes reorgs still inside their announcement window. Without this a
+   * restart during an incident would retire the alert while the reorg is still
+   * the thing you want to be told about.
+   */
+  private async restoreAnnouncements(): Promise<void> {
+    const now = nowSeconds();
+    const recent = await getReorgs(config.reorgAnnounceMax);
+    for (const event of recent.reverse()) {
+      if (now - event.detectedAt >= config.reorgAnnounceSeconds) continue;
+      announceReorg(
+        {
+          client: event.client,
+          type: event.type,
+          blockNumber: event.blockNumber,
+          recordedHash: event.recordedSafeHash,
+          observedHash: event.observedHash,
+          detectedAt: event.detectedAt,
+        },
+        config.reorgAnnounceSeconds,
+        config.reorgAnnounceMax,
+        now,
+      );
+    }
   }
 
   stop(): void {
@@ -333,6 +376,7 @@ export class Monitor {
     try {
       const snapshots = await Promise.all(this.pollers.map((poller) => poller.poll()));
       this.publishDivergence(snapshots);
+      sweepReorgAnnouncements(config.reorgAnnounceSeconds, nowSeconds());
     } catch (error) {
       console.error('[monitor] poll cycle failed:', error instanceof Error ? error.message : error);
     } finally {

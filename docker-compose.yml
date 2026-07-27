@@ -42,6 +42,24 @@ services:
     networks:
       - fcr
 
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      # The directory, not the two files individually: bind-mounting a file that
+      # does not exist yet makes Docker silently create a *directory* at that
+      # path. Mounting the parent means a missing slack_url is a clear startup
+      # error instead. Create it from alertmanager/slack_url.example.
+      - ./alertmanager:/etc/alertmanager:ro
+      - alertmanager-data:/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
+    restart: unless-stopped
+    networks:
+      - fcr
+
   grafana:
     image: grafana/grafana:11.1.0
     environment:
@@ -67,6 +85,7 @@ volumes:
   redis-data:
   prometheus-data:
   grafana-data:
+  alertmanager-data:
 
 networks:
   fcr:

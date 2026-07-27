@@ -59,6 +59,80 @@ export const reorgCounter = new Counter({
   registers: [registry],
 });
 
+/**
+ * Carries the offending block on its labels so a notification can name it.
+ * `fcr_reorgs_total` says a reorg happened; this says which block, what we had
+ * recorded, and what turned up instead.
+ *
+ * Hashes as label values are unbounded cardinality — every reorg mints a series
+ * that lives for the whole retention window. So an announcement is deliberately
+ * short-lived (`REORG_ANNOUNCE_SECONDS`) and the live set is capped
+ * (`REORG_ANNOUNCE_MAX`): long enough for an alert to fire and reach Slack,
+ * after which the series stops being exported and Prometheus marks it stale.
+ * The permanent record is the counter and the Redis history, not this.
+ */
+export const reorgInfoGauge = new Gauge({
+  name: 'fcr_reorg_info',
+  help: '1 while a recently detected reorg is being announced; labels carry the offending block',
+  labelNames: ['client', 'type', 'block_number', 'recorded_hash', 'observed_hash'] as const,
+  registers: [registry],
+});
+
+export interface ReorgAnnouncement {
+  client: string;
+  type: string;
+  blockNumber: number;
+  /** The hash this client had previously confirmed as safe at blockNumber. */
+  recordedHash: string;
+  /** What actually turned up: the finalized hash, or the replacement safe hash. */
+  observedHash: string;
+  /** Unix seconds of detection. The announcement expires relative to this. */
+  detectedAt: number;
+}
+
+type AnnouncementLabels = Record<string, string>;
+
+const liveAnnouncements = new Map<string, { labels: AnnouncementLabels; detectedAt: number }>();
+
+const announcementLabels = (a: ReorgAnnouncement): AnnouncementLabels => ({
+  client: a.client,
+  type: a.type,
+  block_number: String(a.blockNumber),
+  recorded_hash: a.recordedHash,
+  observed_hash: a.observedHash,
+});
+
+const announcementKey = (a: ReorgAnnouncement): string =>
+  `${a.client}|${a.type}|${a.blockNumber}|${a.recordedHash}|${a.observedHash}`;
+
+/** Publishes one reorg for alerting. Re-announcing the same event refreshes its expiry. */
+export function announceReorg(a: ReorgAnnouncement, ttlSeconds: number, max: number, now: number): void {
+  const labels = announcementLabels(a);
+  liveAnnouncements.set(announcementKey(a), { labels, detectedAt: a.detectedAt });
+  reorgInfoGauge.set(labels, 1);
+
+  // A chain split can produce reorgs in bursts. Drop the oldest past the cap so
+  // a bad hour cannot blow up the series count; Redis keeps the full history.
+  if (liveAnnouncements.size > max) {
+    const byAge = [...liveAnnouncements.entries()].sort((x, y) => x[1].detectedAt - y[1].detectedAt);
+    for (const [key, entry] of byAge.slice(0, liveAnnouncements.size - max)) {
+      reorgInfoGauge.remove(entry.labels);
+      liveAnnouncements.delete(key);
+    }
+  }
+
+  sweepReorgAnnouncements(ttlSeconds, now);
+}
+
+/** Retires announcements past their TTL. Called every poll so expiry does not wait on the next reorg. */
+export function sweepReorgAnnouncements(ttlSeconds: number, now: number): void {
+  for (const [key, entry] of liveAnnouncements) {
+    if (now - entry.detectedAt < ttlSeconds) continue;
+    reorgInfoGauge.remove(entry.labels);
+    liveAnnouncements.delete(key);
+  }
+}
+
 export const rpcErrorCounter = new Counter({
   name: 'fcr_rpc_errors_total',
   help: 'Failed JSON-RPC calls',

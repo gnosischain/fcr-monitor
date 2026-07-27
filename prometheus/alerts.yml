@@ -1,14 +1,20 @@
 groups:
   - name: fcr
     rules:
+      # Fires per offending block rather than per client, so the block number and
+      # both hashes ride the alert's labels into the notification. Supersedes an
+      # earlier rule on increase(fcr_reorgs_total) — same condition, no detail.
       - alert: FcrReorgDetected
-        expr: increase(fcr_reorgs_total[10m]) > 0
+        expr: fcr_reorg_info == 1
         for: 0m
         labels:
           severity: critical
         annotations:
-          summary: "Reorg past the fast confirmation rule on {{ $labels.client }}"
-          description: "{{ $labels.type }} detected on {{ $labels.client }}. See the Reorg tab on the monitor."
+          summary: "{{ $labels.type }} on {{ $labels.client }} at block {{ $labels.block_number }}"
+          description: >-
+            Block {{ $labels.block_number }} was confirmed as {{ $labels.recorded_hash }}
+            and is now {{ $labels.observed_hash }}.
+            See the Reorg tab on the monitor.
 
       - alert: FcrClientDown
         expr: fcr_client_up == 0

@@ -89,6 +89,17 @@ export const config = {
 
   /** How many reorg events to retain in Redis. */
   reorgHistory: numeric('REORG_HISTORY', 500),
+
+  /**
+   * How long a detected reorg stays on `fcr_reorg_info`. The labels include
+   * block hashes, so this is a cardinality budget as much as an alerting one:
+   * it must comfortably exceed Prometheus's evaluation interval plus
+   * Alertmanager's group_wait, and little more.
+   */
+  reorgAnnounceSeconds: numeric('REORG_ANNOUNCE_SECONDS', 900),
+
+  /** Ceiling on concurrently announced reorgs, so a chain split cannot flood the TSDB. */
+  reorgAnnounceMax: numeric('REORG_ANNOUNCE_MAX', 20),
 };
 
 export function slotOfTimestamp(timestamp: number): number {
