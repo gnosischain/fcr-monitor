@@ -93,11 +93,6 @@ export function createServer() {
     }
   });
 
-  app.get('/metrics', async (_req, res) => {
-    res.set('Content-Type', registry.contentType);
-    res.end(await registry.metrics());
-  });
-
   app.get('/healthz', async (_req, res) => {
     try {
       await redis.ping();
@@ -108,6 +103,32 @@ export function createServer() {
   });
 
   app.use(express.static(publicDir, { maxAge: '5m', index: 'index.html' }));
+
+  return app;
+}
+
+/**
+ * `/metrics` is served on its own port, deliberately separate from the public
+ * app above.
+ *
+ * The dashboard is reachable from the internet, and the metrics endpoint has no
+ * authentication — it also exposes Node process, GC and event-loop internals via
+ * `collectDefaultMetrics`. Splitting the listener means the public port can be
+ * the only one published by an ingress, and scrapers target the metrics port
+ * directly, so there is nothing to filter at the edge and no path-normalisation
+ * trickery (`/METRICS`, `//metrics`, `/./metrics`) to lose to.
+ *
+ * `/healthz` stays on the public app so a load balancer can reach it without
+ * opening a second port.
+ */
+export function createMetricsServer() {
+  const app = express();
+  app.disable('x-powered-by');
+
+  app.get('/metrics', async (_req, res) => {
+    res.set('Content-Type', registry.contentType);
+    res.end(await registry.metrics());
+  });
 
   return app;
 }

@@ -96,8 +96,8 @@ docker compose up -d --build
 
 | service | address | notes |
 |---|---|---|
-| dashboard | `127.0.0.1:3000` | two tabs: FCR monitoring, Reorg |
-| Prometheus | `127.0.0.1:9090` | scrapes the monitor's `/metrics` |
+| dashboard | `127.0.0.1:3000` | two tabs: FCR monitoring, Reorg. Also `/api/*` and `/healthz` |
+| Prometheus | `127.0.0.1:9090` | scrapes the monitor's `/metrics` on port `9100` |
 | Grafana | `127.0.0.1:3001` | dashboard "FCR Monitor" pre-provisioned |
 | Alertmanager | `127.0.0.1:9093` | routes the reorg alert to Slack |
 | Redis | not published | reachable only on the compose network |
@@ -183,7 +183,7 @@ Beyond that:
 
 ## Metrics
 
-`GET /metrics` exposes, among others:
+`GET /metrics` on **port `9100`** (`METRICS_PORT`) exposes, among others:
 
 | metric | labels | |
 |---|---|---|
@@ -198,6 +198,13 @@ Beyond that:
 | `fcr_tracked_safe_blocks` | `client` | safe blocks awaiting finalization |
 | `fcr_walk_truncated_total` | `client`, `phase` | coverage gaps from hitting `MAX_WALK_BLOCKS` |
 
+`/metrics` is on a **separate listener** from the dashboard, not a path on port
+3000. It is unauthenticated and also carries Node process/GC/event-loop
+internals, so it must not share a port with anything published to users: an
+ingress can then expose 3000 alone, with no edge filtering to get wrong and no
+path-normalisation trickery (`/METRICS`, `//metrics`, `/./metrics`) to lose to.
+`/healthz` deliberately stays on 3000 so a load balancer needs only one port.
+
 Alert rules for all of these are in `prometheus/alerts.yml`. All of them
 evaluate; only the reorg alert is routed to Slack — see [Slack
 alerting](#slack-alerting).
@@ -209,6 +216,20 @@ alerting](#slack-alerting).
 All optional except the two RPC URLs — see `.env.example`. Chain parameters
 default to Ethereum mainnet (`GENESIS_TIME=1606824023`, 12s slots, 32 slots per
 epoch); override them for a testnet.
+
+## Deployment
+
+Production runs on Gnosis' GKE cluster at
+<https://fcr.bridge.gnosischain.com>. The Terraform lives in the
+`infrastructure-gnosis` repo under
+`production/google/deployments/gnosis-chain/mainnet/tools/fcr-monitor/`, and
+Grafana is not deployed there — the metrics are scraped into the org's
+Prometheus/Thanos, which already has Grafana in front of it.
+
+Images are built by [`.github/workflows/publish-image.yml`](.github/workflows/publish-image.yml)
+and pushed to Artifact Registry via Workload Identity Federation. The workflow
+never touches the cluster: deploying is a reviewed PR in the infra repo bumping a
+digest-pinned tag.
 
 ## Local development
 
