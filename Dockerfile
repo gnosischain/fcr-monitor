@@ -45,6 +45,24 @@ ENV NODE_ENV=production
 # image for an attacker to use. Liveness/readiness are httpGet probes on the
 # Deployment instead.
 
+# Strip the package managers. The entrypoint is `node dist/index.js` and the
+# dependencies are already baked in, so npm/npx/corepack are build-time tools
+# that have no business in a production image — an attacker with code execution
+# should not find a package installer waiting for them.
+#
+# This is also what clears the image's CVE report: every HIGH/CRITICAL finding
+# Trivy raised (tar, sigstore, brace-expansion, picomatch) came from npm's OWN
+# bundled node_modules, not from this project's dependencies — none of the four
+# appear in package-lock.json. Deleting npm removes the vulnerable code rather
+# than adding an exception for it.
+RUN rm -rf \
+      /usr/local/lib/node_modules/npm \
+      /usr/local/lib/node_modules/corepack \
+      /usr/local/bin/npm \
+      /usr/local/bin/npx \
+      /usr/local/bin/corepack \
+      /opt/yarn-v*
+
 # Copies stay root-owned, so the `node` user can read the app but not modify it.
 # That is what makes readOnlyRootFilesystem: true viable with no carve-out
 # beyond an emptyDir at /tmp.

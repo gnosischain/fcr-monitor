@@ -72,25 +72,33 @@ jobs:
       - name: build image for scanning
         run: docker build --load -t fcr-monitor:scan .
 
-      # Trivy is run as a digest-pinned container rather than via
-      # aquasecurity/trivy-action. The action shells out to an install script
-      # that queries the GitHub API to resolve the release, which is
-      # rate-limited on shared runners and failed on the first run here before
-      # it had even fetched the vulnerability DB.
+      # Trivy runs as a digest-pinned container rather than via
+      # aquasecurity/trivy-action: that action shells out to an install script
+      # which queries the GitHub API to resolve the release, is rate-limited on
+      # shared runners, and failed here before it had even fetched the
+      # vulnerability DB. A security gate that breaks for non-security reasons
+      # teaches people to delete the gate.
       #
-      # Scanning a `docker save` tarball via --input also means the scanner
-      # needs no access to the Docker socket.
+      # It scans the FLATTENED filesystem (docker export + trivy rootfs), not a
+      # `docker save` layer tarball. This matters: the Dockerfile deletes npm from
+      # the runtime stage, but `rm` only writes a whiteout — the files remain in
+      # the underlying base-image layer. Scanning layers therefore reports CVEs in
+      # npm's bundled dependencies (tar, sigstore, brace-expansion, picomatch)
+      # that are not present in, and cannot be executed by, the running
+      # container. `docker export` applies whiteouts, so this scans exactly what
+      # the container actually has.
       - name: scan image
         env:
           TRIVY_IMAGE: aquasec/trivy:0.65.0@sha256:a22415a38938a56c379387a8163fcb0ce38b10ace73e593475d3658d578b2436
         run: |
           set -euo pipefail
-          mkdir -p "${RUNNER_TEMP}/scan"
-          docker save fcr-monitor:scan -o "${RUNNER_TEMP}/scan/image.tar"
+          cid="$(docker create fcr-monitor:scan)"
+          mkdir -p "${RUNNER_TEMP}/rootfs"
+          docker export "$cid" | tar -x -C "${RUNNER_TEMP}/rootfs"
+          docker rm -f "$cid" >/dev/null
           docker run --rm \
-            -v "${RUNNER_TEMP}/scan:/scan:ro" \
-            "${TRIVY_IMAGE}" image \
-              --input /scan/image.tar \
+            -v "${RUNNER_TEMP}/rootfs:/rootfs:ro" \
+            "${TRIVY_IMAGE}" rootfs /rootfs \
               --severity HIGH,CRITICAL \
               --ignore-unfixed \
               --exit-code 1 \
