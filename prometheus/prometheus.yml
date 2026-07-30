@@ -13,4 +13,6 @@ alerting:
 scrape_configs:
   - job_name: fcr-monitor
     static_configs:
-      - targets: ["monitor:3000"]
+      # 9100, not 3000: /metrics is served on its own listener so the port that
+      # faces users never exposes it. See createMetricsServer() in src/server.ts.
+      - targets: ["monitor:9100"]

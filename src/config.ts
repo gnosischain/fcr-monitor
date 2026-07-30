@@ -66,6 +66,12 @@ export const config = {
   port: numeric('PORT', 3000),
   host: process.env.HOST ?? '0.0.0.0',
 
+  /**
+   * `/metrics` listens here rather than on `port`. The dashboard is public and
+   * the metrics endpoint is unauthenticated, so they must not share a listener.
+   */
+  metricsPort: numeric('METRICS_PORT', 9100),
+
   /** One Ethereum slot. Every poll re-reads safe/finalized/latest from both clients. */
   pollIntervalMs: numeric('POLL_INTERVAL_MS', 12_000),
   rpcTimeoutMs: numeric('RPC_TIMEOUT_MS', 5_000),

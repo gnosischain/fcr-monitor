@@ -1,0 +1,194 @@
+name: publish-image
+
+# Builds the container image and pushes it to Gnosis' Artifact Registry.
+#
+# Deliberately does NOT deploy. The image tag is pinned by digest in the
+# infrastructure repo and bumped by a reviewed PR, so this pipeline needs no
+# access to the GKE cluster and no `roles/container.developer`. The blast radius
+# of a compromised workflow is therefore "can push an image nobody deployed".
+#
+# Infra: production/google/deployments/gnosis-chain/mainnet/tools/fcr-monitor/
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege at the top level. Only the `publish` job re-declares
+# permissions and adds `id-token: write`, so no other job can mint an OIDC token
+# that Google Cloud would trust.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  AR_HOST: europe-west1-docker.pkg.dev
+  IMAGE: europe-west1-docker.pkg.dev/gnosischain-production/fcr-monitor/fcr-monitor
+  # Single-arch on purpose: every node pool on gnosischain-nodes is x86_64.
+  # Verify with:
+  #   gcloud container node-pools list --cluster gnosischain-nodes \
+  #     --region europe-west1 --format='table(name,config.machineType)'
+  PLATFORMS: linux/amd64
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # verify — runs on pull requests too, including from forks. Holds no
+  # credentials and has no id-token permission, so a malicious PR cannot reach
+  # Google Cloud. This is why build-and-push is a separate job.
+  # ---------------------------------------------------------------------------
+  verify:
+    name: typecheck and scan
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          # Don't leave a usable GITHUB_TOKEN in .git/config for later steps.
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          # Must match the Dockerfile base. `engines.node` is ">=20", which a
+          # node-version-file would resolve to the newest LTS and silently drift.
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+
+      # The only real quality gate in this repo. tsc runs with strict and
+      # noUncheckedIndexedAccess, and it type-checks and emits in one pass.
+      # There is deliberately no `npm test` or `npm run lint` — neither script
+      # exists, so invoking them would fail.
+      - name: typecheck and build
+        run: npm run build
+
+      - name: build image for scanning
+        run: docker build --load -t fcr-monitor:scan .
+
+      # Trivy runs as a digest-pinned container rather than via
+      # aquasecurity/trivy-action: that action shells out to an install script
+      # which queries the GitHub API to resolve the release, is rate-limited on
+      # shared runners, and failed here before it had even fetched the
+      # vulnerability DB. A security gate that breaks for non-security reasons
+      # teaches people to delete the gate.
+      #
+      # It scans the FLATTENED filesystem (docker export + trivy rootfs), not a
+      # `docker save` layer tarball. This matters: the Dockerfile deletes npm from
+      # the runtime stage, but `rm` only writes a whiteout — the files remain in
+      # the underlying base-image layer. Scanning layers therefore reports CVEs in
+      # npm's bundled dependencies (tar, sigstore, brace-expansion, picomatch)
+      # that are not present in, and cannot be executed by, the running
+      # container. `docker export` applies whiteouts, so this scans exactly what
+      # the container actually has.
+      - name: scan image
+        env:
+          TRIVY_IMAGE: aquasec/trivy:0.65.0@sha256:a22415a38938a56c379387a8163fcb0ce38b10ace73e593475d3658d578b2436
+        run: |
+          set -euo pipefail
+          cid="$(docker create fcr-monitor:scan)"
+          mkdir -p "${RUNNER_TEMP}/rootfs"
+          docker export "$cid" | tar -x -C "${RUNNER_TEMP}/rootfs"
+          docker rm -f "$cid" >/dev/null
+          docker run --rm \
+            -v "${RUNNER_TEMP}/rootfs:/rootfs:ro" \
+            "${TRIVY_IMAGE}" rootfs /rootfs \
+              --severity HIGH,CRITICAL \
+              --ignore-unfixed \
+              --exit-code 1 \
+              --no-progress
+
+  # ---------------------------------------------------------------------------
+  # publish — only on main and version tags. Never on pull_request, so a fork
+  # can never obtain the OIDC token.
+  # ---------------------------------------------------------------------------
+  publish:
+    name: build and push
+    needs: verify
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write # required for Workload Identity Federation
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      # Keyless auth via Workload Identity Federation — no service-account key
+      # exists to leak. The provider's attribute_condition restricts the exchange
+      # to this repository and to main/tags; see the infra repo's github_oidc.tf.
+      - id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.AR_HOST }}
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - id: meta
+        name: compute tags
+        run: |
+          set -euo pipefail
+          # Immutable, content-addressed tags only. Never `latest`: the
+          # Artifact Registry repo has immutable_tags = true, and the deployment
+          # pins a digest, so a moving tag would be both rejected and useless.
+          tags="${IMAGE}:sha-${GITHUB_SHA::12}"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tags="${tags},${IMAGE}:${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+
+      - id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          # SLSA provenance and an SBOM, both attached to the image in AR.
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      # Keyless signature bound to this workflow's OIDC identity, so the infra
+      # repo can verify where a digest came from before pinning it.
+      - name: sign the image
+        run: cosign sign --yes "${IMAGE}@${{ steps.build.outputs.digest }}"
+
+      - name: summary
+        run: |
+          {
+            echo "### Image published"
+            echo
+            echo '```'
+            echo "${IMAGE}@${{ steps.build.outputs.digest }}"
+            echo '```'
+            echo
+            echo "Pin this in \`locals.tf\` of"
+            echo "\`production/google/deployments/gnosis-chain/mainnet/tools/fcr-monitor/\`"
+            echo "in the \`infrastructure-gnosis\` repo, then open a PR."
+            echo
+            echo "Verify the signature with:"
+            echo '```'
+            echo "cosign verify ${IMAGE}@${{ steps.build.outputs.digest }} \\"
+            echo "  --certificate-identity-regexp 'https://github.com/gnosischain/fcr-monitor/.*' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

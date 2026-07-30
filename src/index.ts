@@ -2,7 +2,7 @@ import { config } from './config.js';
 import { initClientMetrics } from './metrics.js';
 import { Monitor } from './poller.js';
 import { getChainId } from './rpc.js';
-import { createServer } from './server.js';
+import { createMetricsServer, createServer } from './server.js';
 import { initStartedAt, redis } from './store.js';
 
 async function main(): Promise<void> {
@@ -39,10 +39,16 @@ async function main(): Promise<void> {
     console.log(`[fcr-monitor] listening on ${config.host}:${config.port}`);
   });
 
+  // Separate listener so the public port never serves /metrics. See createMetricsServer().
+  const metricsServer = createMetricsServer().listen(config.metricsPort, config.host, () => {
+    console.log(`[fcr-monitor] metrics on ${config.host}:${config.metricsPort}/metrics`);
+  });
+
   const shutdown = async (signal: string) => {
     console.log(`[fcr-monitor] ${signal} received, shutting down`);
     monitor.stop();
     server.close();
+    metricsServer.close();
     await redis.quit().catch(() => undefined);
     process.exit(0);
   };

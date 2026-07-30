@@ -1,8 +1,25 @@
-node_modules
-dist
-.env
-.git
-*.log
-grafana
-prometheus
-README.md
+# Deny everything, then re-include only what the image actually needs.
+#
+# Inverted deliberately. The previous allow-list-of-exclusions did not mention
+# `alertmanager/`, so `alertmanager/slack_url` — a live Slack webhook, gitignored
+# precisely because it is a credential — was being copied into every build
+# context. It never reached the image, but it did reach the builder and its
+# cache, which matters on a shared or remote builder.
+#
+# With deny-all, a new secret file added to the repo tomorrow is excluded by
+# default rather than by someone remembering to come back here.
+*
+
+!package.json
+!package-lock.json
+!tsconfig.json
+!src
+!public
+
+# Re-exclude anything that could reappear inside an allowed tree.
+**/node_modules
+**/dist
+**/.env
+**/.env.*
+**/*.log
+**/.DS_Store
