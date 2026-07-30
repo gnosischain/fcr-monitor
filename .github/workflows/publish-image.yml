@@ -72,13 +72,29 @@ jobs:
       - name: build image for scanning
         run: docker build --load -t fcr-monitor:scan .
 
+      # Trivy is run as a digest-pinned container rather than via
+      # aquasecurity/trivy-action. The action shells out to an install script
+      # that queries the GitHub API to resolve the release, which is
+      # rate-limited on shared runners and failed on the first run here before
+      # it had even fetched the vulnerability DB.
+      #
+      # Scanning a `docker save` tarball via --input also means the scanner
+      # needs no access to the Docker socket.
       - name: scan image
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
-        with:
-          image-ref: fcr-monitor:scan
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: "1"
+        env:
+          TRIVY_IMAGE: aquasec/trivy:0.65.0@sha256:a22415a38938a56c379387a8163fcb0ce38b10ace73e593475d3658d578b2436
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/scan"
+          docker save fcr-monitor:scan -o "${RUNNER_TEMP}/scan/image.tar"
+          docker run --rm \
+            -v "${RUNNER_TEMP}/scan:/scan:ro" \
+            "${TRIVY_IMAGE}" image \
+              --input /scan/image.tar \
+              --severity HIGH,CRITICAL \
+              --ignore-unfixed \
+              --exit-code 1 \
+              --no-progress
 
   # ---------------------------------------------------------------------------
   # publish — only on main and version tags. Never on pull_request, so a fork
