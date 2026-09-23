@@ -19,7 +19,7 @@ groups:
         annotations:
           summary: "{{ $labels.type }} on {{ $labels.client }} at block {{ $labels.block_number }}"
           description: >-
-            Block {{ $labels.block_number }} was confirmed as {{ $labels.recorded_hash }}
+            Block {{ $labels.block_number }} was confirmed as {{ $labels.recorded_safe_hash }}
             and is now {{ $labels.observed_hash }}. A block confirmed by the fast
             confirmation rule was reorged out. See the Alerts tab on the monitor.
 

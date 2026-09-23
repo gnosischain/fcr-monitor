@@ -75,7 +75,7 @@ export const fallbackEventCounter = new Counter({
 export const fallbackEventInfoGauge = new Gauge({
   name: 'fcr_fallback_event_info',
   help: '1 while a recently detected fallback event is being announced; labels carry the offending block',
-  labelNames: ['client', 'type', 'severity', 'block_number', 'recorded_hash', 'observed_hash'] as const,
+  labelNames: ['client', 'type', 'severity', 'block_number', 'recorded_safe_hash', 'observed_hash'] as const,
   registers: [registry],
 });
 
@@ -86,7 +86,7 @@ export interface FallbackEventAnnouncement {
   severity: Severity;
   blockNumber: number;
   /** The hash this client had previously confirmed as safe at blockNumber. */
-  recordedHash: string;
+  recordedSafeHash: string;
   /** What actually turned up: the finalized hash, or the replacement safe hash. */
   observedHash: string;
   /** Unix seconds of detection. The announcement expires relative to this. */
@@ -102,12 +102,12 @@ const announcementLabels = (a: FallbackEventAnnouncement): AnnouncementLabels =>
   type: a.type,
   severity: a.severity,
   block_number: String(a.blockNumber),
-  recorded_hash: a.recordedHash,
+  recorded_safe_hash: a.recordedSafeHash,
   observed_hash: a.observedHash,
 });
 
 const announcementKey = (a: FallbackEventAnnouncement): string =>
-  `${a.client}|${a.type}|${a.blockNumber}|${a.recordedHash}|${a.observedHash}`;
+  `${a.client}|${a.type}|${a.blockNumber}|${a.recordedSafeHash}|${a.observedHash}`;
 
 /** Publishes one fallback event for alerting. Re-announcing the same event refreshes its expiry. */
 export function announceFallbackEvent(a: FallbackEventAnnouncement, ttlSeconds: number, max: number, now: number): void {
@@ -156,7 +156,7 @@ export const rpcErrorCounter = new Counter({
   registers: [registry],
 });
 
-export const rpcDuration = new Histogram({
+export const rpcDurationHistogram = new Histogram({
   name: 'fcr_rpc_duration_seconds',
   help: 'Latency of a full poll cycle against one client',
   labelNames: ['client'] as const,

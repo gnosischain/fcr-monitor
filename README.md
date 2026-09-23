@@ -143,10 +143,10 @@ docker compose up -d --build
 
 | service | address | notes |
 |---|---|---|
-| dashboard | `127.0.0.1:3000` | two tabs: FCR monitoring, Alerts. Also `/api/*` and `/healthz` |
+| dashboard | `127.0.0.1:3000` | three tabs: FCR monitoring, Alerts, Reference. Also `/api/*` and `/healthz` |
 | Prometheus | `127.0.0.1:9090` | scrapes the monitor's `/metrics` on port `9100` |
 | Grafana | `127.0.0.1:3001` | dashboard "FCR Monitor" pre-provisioned |
-| Alertmanager | `127.0.0.1:9093` | routes the fallback event alert to Slack |
+| Alertmanager | `127.0.0.1:9093` | routes `FcrConfirmedBlockReorged` to Slack |
 | Redis | not published | reachable only on the compose network |
 
 Every published port is bound to loopback, so nothing is reachable from outside
@@ -189,8 +189,8 @@ block on its labels. It is deliberately short-lived and capped at
 `FALLBACK_EVENT_ANNOUNCE_MAX`
 (default 20) concurrent series: hashes as label values are unbounded
 cardinality, so the announcement lives just long enough to alert. The permanent
-record is `fcr_fallback_events_total` and the Redis history behind the Fallback
-events tab.
+record is `fcr_fallback_events_total` and the Redis history behind the Alerts
+tab.
 Announcements still inside their window are re-published on restart.
 
 There is no resolved notification — the announcement expiring means the alerting
@@ -201,7 +201,7 @@ To check the wiring without waiting for a real event:
 ```bash
 docker compose exec alertmanager amtool --alertmanager.url=http://localhost:9093 \
   alert add alertname=FcrConfirmedBlockReorged client=nimbus type=finalized_mismatch severity=critical \
-  block_number=1 recorded_hash=0xaaa observed_hash=0xbbb \
+  block_number=1 recorded_safe_hash=0xaaa observed_hash=0xbbb \
   --annotation='summary=pipe test'
 ```
 
@@ -244,7 +244,7 @@ Beyond that:
 | `fcr_block_age_seconds` | `client`, `tag` | wall-clock age; a rising `safe` means confirmation stalled |
 | `fcr_lag_blocks` | `client`, `tag` | distance behind head |
 | `fcr_fallback_events_total` | `client`, `type`, `severity` | counter per detection type |
-| `fcr_fallback_event_info` | `client`, `type`, `severity`, `block_number`, `recorded_hash`, `observed_hash` | 1 while a recent fallback event is being announced; the alert rules select on `severity` |
+| `fcr_fallback_event_info` | `client`, `type`, `severity`, `block_number`, `recorded_safe_hash`, `observed_hash` | 1 while a recent fallback event is being announced; the alert rules select on `severity` |
 | `fcr_client_divergence` | `tag` | 1 when the two clients disagree |
 | `fcr_client_up` | `client` | RPC reachability |
 | `fcr_tracked_safe_blocks` | `client` | safe blocks awaiting finalization |
@@ -259,7 +259,7 @@ path-normalisation trickery (`/METRICS`, `//metrics`, `/./metrics`) to lose to.
 `/healthz` deliberately stays on 3000 so a load balancer needs only one port.
 
 Alert rules for all of these are in `prometheus/alerts.yml`. All of them
-evaluate; only the fallback event alert is routed to Slack — see [Slack
+evaluate; only `FcrConfirmedBlockReorged` is routed to Slack — see [Slack
 alerting](#slack-alerting).
 
 ---
@@ -289,7 +289,8 @@ condition.
 |---|---|
 | `fcr_reorgs_total` | `fcr_fallback_events_total` |
 | `fcr_reorg_info` | `fcr_fallback_event_info` |
-| `FcrReorgDetected` | `FcrFallbackEventDetected` |
+| `recorded_hash` label on `fcr_fallback_event_info` | `recorded_safe_hash` |
+| `FcrReorgDetected` | `FcrConfirmedBlockReorged` (critical) and `FcrConfirmationWithdrawn` (warning) |
 | `GET /api/reorgs` | `GET /api/fallback-events` |
 | `fcr:reorgs` (Redis) | `fcr:fallback_events` |
 | `REORG_HISTORY` | `FALLBACK_EVENT_HISTORY` |
@@ -297,7 +298,7 @@ condition.
 | `REORG_ANNOUNCE_MAX` | `FALLBACK_EVENT_ANNOUNCE_MAX` |
 | `reorgCount` (in `/api/state`) | `fallbackEventCount` |
 | `reorgs` (in the events payload) | `events` |
-| "Reorg" tab | "Fallback events" tab |
+| "Reorg" tab | "Alerts" tab |
 
 `prometheus/alerts.yml`, `alertmanager/alertmanager.yml` and
 `grafana/dashboards/fcr-monitor.json` in this repo are updated in the same

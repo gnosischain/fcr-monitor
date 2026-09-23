@@ -32,7 +32,7 @@ import {
   lagGauge,
   lastPollGauge,
   fallbackEventCounter,
-  rpcDuration,
+  rpcDurationHistogram,
   rpcErrorCounter,
   sweepFallbackEventAnnouncements,
   trackedSafeGauge,
@@ -94,7 +94,7 @@ class ClientPoller {
   async poll(): Promise<ClientSnapshot> {
     // Read before this poll's own result overwrites it.
     const previousPollHadSafe = this.previousPollHadSafe;
-    const stopTimer = rpcDuration.startTimer({ client: this.client.id });
+    const stopTimer = rpcDurationHistogram.startTimer({ client: this.client.id });
     const url = this.client.rpcUrl;
     const timeout = config.rpcTimeoutMs;
 
@@ -433,7 +433,7 @@ class ClientPoller {
         type: event.type,
         severity: event.severity,
         blockNumber: event.blockNumber,
-        recordedHash: event.recordedSafeHash,
+        recordedSafeHash: event.recordedSafeHash,
         observedHash: event.observedHash,
         detectedAt: event.detectedAt,
       },
@@ -478,7 +478,7 @@ export class Monitor {
           type: event.type,
           severity: event.severity,
           blockNumber: event.blockNumber,
-          recordedHash: event.recordedSafeHash,
+          recordedSafeHash: event.recordedSafeHash,
           observedHash: event.observedHash,
           detectedAt: event.detectedAt,
         },

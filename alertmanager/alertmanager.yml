@@ -15,7 +15,7 @@ route:
     # two offending blocks never collapse into one message, and do not re-notify:
     # the block is already named in the first message.
     - matchers: [alertname="FcrConfirmedBlockReorged"]
-      receiver: slack-fcr-fallback-event
+      receiver: slack-fcr-confirmed-block-reorged
       group_by: ['client', 'block_number']
       group_wait: 10s
       group_interval: 5m
@@ -24,7 +24,7 @@ route:
 receivers:
   - name: blackhole
 
-  - name: slack-fcr-fallback-event
+  - name: slack-fcr-confirmed-block-reorged
     slack_configs:
       # Modern Slack webhooks are bound to the channel they were created for and
       # ignore this field, but Alertmanager still requires it to be set.
@@ -36,6 +36,6 @@ receivers:
         text: |-
           {{ range .Alerts }}{{ .Annotations.summary }}
           • *block* `{{ .Labels.block_number }}`
-          • *recorded* `{{ .Labels.recorded_hash }}`
+          • *recorded* `{{ .Labels.recorded_safe_hash }}`
           • *actual* `{{ .Labels.observed_hash }}`
           {{ end }}
