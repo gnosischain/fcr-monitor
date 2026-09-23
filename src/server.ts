@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config, epochOfSlot, slotOfTimestamp } from './config.js';
 import { registry } from './metrics.js';
-import { countReorgs, getReorgs, getStartedAt, loadSnapshot, redis, type ClientSnapshot } from './store.js';
+import { countFallbackEvents, getFallbackEvents, getStartedAt, loadSnapshot, redis, type ClientSnapshot } from './store.js';
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
@@ -74,19 +74,23 @@ export function createServer() {
         clients,
         plannedClients: config.plannedClients,
         divergence,
-        reorgCount: await countReorgs(),
+        fallbackEventCount: await countFallbackEvents(),
       });
     } catch (error) {
       res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
     }
   });
 
-  app.get('/api/reorgs', async (_req, res) => {
+  app.get('/api/fallback-events', async (_req, res) => {
     try {
+      const events = await getFallbackEvents();
       res.json({
         startedAt: await getStartedAt(),
         now: Math.floor(Date.now() / 1000),
-        reorgs: await getReorgs(),
+        events,
+        // Split here rather than in the browser so the severity rule lives in one place.
+        alertCount: events.filter((event) => event.severity === 'critical').length,
+        withdrawnCount: events.filter((event) => event.severity === 'warning').length,
       });
     } catch (error) {
       res.status(500).json({ error: error instanceof Error ? error.message : String(error) });

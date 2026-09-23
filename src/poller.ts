@@ -1,21 +1,29 @@
 import { config, epochOfSlot, slotOfTimestamp, type ClientConfig } from './config.js';
-import { getBlockByHash, getBlockByTag, RpcError, type BlockHeader, type BlockTag } from './rpc.js';
+import {
+  getBlockByHash,
+  getBlockByNumber,
+  getBlockByTag,
+  RpcError,
+  type BlockHeader,
+  type BlockTag,
+} from './rpc.js';
+import { severityOf } from './events.js';
 import {
   countSafeBlocks,
   getAllSafeBlocks,
-  getReorgs,
+  getFallbackEvents,
   getSafeBlock,
   loadSnapshot,
-  pruneSafeBlocksUpTo,
-  pushReorg,
+  pruneSafeBlocks,
+  pushFallbackEvent,
   putSafeBlock,
   saveSnapshot,
   type ClientSnapshot,
-  type ReorgEvent,
-  type ReorgType,
+  type FallbackEvent,
+  type FallbackEventType,
 } from './store.js';
 import {
-  announceReorg,
+  announceFallbackEvent,
   blockAgeGauge,
   blockNumberGauge,
   blockSlotGauge,
@@ -23,20 +31,27 @@ import {
   divergenceGauge,
   lagGauge,
   lastPollGauge,
-  reorgCounter,
+  fallbackEventCounter,
   rpcDuration,
   rpcErrorCounter,
-  sweepReorgAnnouncements,
+  sweepFallbackEventAnnouncements,
   trackedSafeGauge,
+  suppressedRegressionCounter,
   walkTruncatedCounter,
 } from './metrics.js';
 
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 
-function settled<T>(result: PromiseSettledResult<T>): { value: T | null; error: string | null } {
+function settled<T>(result: PromiseSettledResult<T>): {
+  value: T | null;
+  error: string | null;
+} {
   if (result.status === 'fulfilled') return { value: result.value, error: null };
   const reason = result.reason;
-  return { value: null, error: reason instanceof Error ? reason.message : String(reason) };
+  return {
+    value: null,
+    error: reason instanceof Error ? reason.message : String(reason),
+  };
 }
 
 class ClientPoller {
@@ -44,6 +59,16 @@ class ClientPoller {
   private lastSafeNumber: number | null = null;
   /** Highest finalized block number we have already swept and pruned. */
   private lastFinalizedNumber: number | null = null;
+  /**
+   * Whether the previous poll actually read a `safe` block from this client.
+   *
+   * Geth does not persist its safe head — on startup it is reinitialised to the last known
+   * finalized block — so every execution-client restart drags the `safe` tag backwards with
+   * no consensus event behind it. The restart itself is what betrays it: the RPC is
+   * unavailable across at least one poll beforehand. A regression observed on the first
+   * poll after that gap is attributed to the execution client and not recorded.
+   */
+  private previousPollHadSafe: boolean | null = null;
 
   constructor(private readonly client: ClientConfig) {}
 
@@ -60,12 +85,15 @@ class ClientPoller {
     if (!snapshot) return;
     this.lastSafeNumber = snapshot.safe?.number ?? null;
     this.lastFinalizedNumber = snapshot.finalized?.number ?? null;
+    this.previousPollHadSafe = snapshot.safe !== null;
     console.log(
       `[${this.client.id}] restored cursors safe=${this.lastSafeNumber} finalized=${this.lastFinalizedNumber}`,
     );
   }
 
   async poll(): Promise<ClientSnapshot> {
+    // Read before this poll's own result overwrites it.
+    const previousPollHadSafe = this.previousPollHadSafe;
     const stopTimer = rpcDuration.startTimer({ client: this.client.id });
     const url = this.client.rpcUrl;
     const timeout = config.rpcTimeoutMs;
@@ -94,7 +122,13 @@ class ClientPoller {
     const online = latest.value !== null;
     clientUpGauge.set({ client: this.client.id }, online ? 1 : 0);
 
-    if (safe.value) await this.processSafe(safe.value);
+    this.previousPollHadSafe = safe.value !== null;
+
+    // A node that is syncing or lagging stops advancing its own head. Measured from the same
+    // poll that sees the regression, so the two judgements cannot drift apart.
+    const headAgeSeconds = latest.value === null ? null : nowSeconds() - latest.value.timestamp;
+
+    if (safe.value) await this.processSafe(safe.value, { previousPollHadSafe, headAgeSeconds });
     if (finalized.value) await this.processFinalized(finalized.value);
 
     this.publishBlockMetrics('safe', safe.value, latest.value);
@@ -141,24 +175,63 @@ class ClientPoller {
    * the client considered safe at this instant, not whatever is canonical by
    * the time we ask.
    */
-  private async processSafe(safe: BlockHeader): Promise<void> {
+  private async processSafe(
+    safe: BlockHeader,
+    context: { previousPollHadSafe: boolean | null; headAgeSeconds: number | null },
+  ): Promise<void> {
     const seenAt = nowSeconds();
 
-    // The safe tip moving backwards is an outright violation of the fast
-    // confirmation rule and needs no further corroboration.
+    // The safe tip moving backwards is NOT on its own a violation of the fast confirmation
+    // rule. The rule withdraws a confirmation deliberately when it cannot re-prove safety,
+    // reverting to the finalized checkpoint; a syncing node or an execution-client restart
+    // produces the same move with nothing on chain behind it. Recorded at `warning`
+    // severity as a diagnostic — `safe_reorg` and `finalized_mismatch` are the proof.
     if (this.lastSafeNumber !== null && safe.number < this.lastSafeNumber) {
-      await this.recordReorg({
-        type: 'safe_regression',
-        blockNumber: safe.number,
-        recordedSafeHash: (await getSafeBlock(this.client.id, this.lastSafeNumber))?.hash ?? 'unknown',
-        observedHash: safe.hash,
-        recordedAt: null,
-        timestamp: safe.timestamp,
-        note:
-          `Safe tip moved backwards from block ${this.lastSafeNumber} to ${safe.number}. ` +
-          `A confirmed block was un-confirmed.`,
-      });
-      this.lastSafeNumber = safe.number;
+      // Two ways this node, rather than the network, explains the backwards move:
+      //
+      //   el_unavailable — the execution client served no safe block on the previous poll, so
+      //     it was restarting. Geth does not persist its safe head; on startup it is
+      //     reinitialised to the last known finalized block, which is exactly this move.
+      //
+      //   node_behind — the node's own head is stale, so it is syncing or lagging. Its
+      //     consensus client pins the confirmed root to finality until it catches up.
+      //
+      // Deliberately narrow: only `safe_regression` is suppressed. `safe_reorg` and
+      // `finalized_mismatch` compare hashes at a height already recorded as safe, so they stay
+      // armed throughout and remain the signals that actually page.
+      const suppressReason =
+        context.previousPollHadSafe === false
+          ? 'el_unavailable'
+          : context.headAgeSeconds !== null && context.headAgeSeconds > config.nodeBehindSeconds
+            ? 'node_behind'
+            : null;
+
+      if (suppressReason !== null) {
+        suppressedRegressionCounter.inc({ client: this.client.id, reason: suppressReason });
+        const because =
+          suppressReason === 'el_unavailable'
+            ? 'the execution client was unreachable on the previous poll'
+            : `this node's head is ${context.headAgeSeconds}s old, so it is behind the chain`;
+        console.warn(
+          `[${this.client.id}] safe tip moved backwards from ${this.lastSafeNumber} to ` +
+            `${safe.number}, but ${because}; attributed to this node rather than to consensus, ` +
+            `and not recorded as a fallback event`,
+        );
+        this.lastSafeNumber = safe.number;
+      } else {
+        await this.recordFallbackEvent({
+          type: 'safe_regression',
+          blockNumber: safe.number,
+          recordedSafeHash: (await getSafeBlock(this.client.id, this.lastSafeNumber))?.hash ?? 'unknown',
+          observedHash: safe.hash,
+          recordedAt: null,
+          timestamp: safe.timestamp,
+          note:
+            `Safe tip moved backwards from block ${this.lastSafeNumber} to ${safe.number}. ` +
+            `A confirmed block was un-confirmed.`,
+        });
+        this.lastSafeNumber = safe.number;
+      }
     }
 
     const floor = this.lastSafeNumber === null ? safe.number : Math.min(this.lastSafeNumber, safe.number);
@@ -196,7 +269,7 @@ class ClientPoller {
   private async reconcileSafeBlock(block: BlockHeader, seenAt: number): Promise<void> {
     const existing = await getSafeBlock(this.client.id, block.number);
     if (existing && existing.hash !== block.hash) {
-      await this.recordReorg({
+      await this.recordFallbackEvent({
         type: 'safe_reorg',
         blockNumber: block.number,
         recordedSafeHash: existing.hash,
@@ -227,35 +300,46 @@ class ClientPoller {
     const tracked = await getAllSafeBlocks(this.client.id);
     const pending = [...tracked.keys()].filter(
       (number) =>
-        number <= finalized.number && (this.lastFinalizedNumber === null || number > this.lastFinalizedNumber),
+        number <= finalized.number &&
+        (this.lastFinalizedNumber === null || number > this.lastFinalizedNumber),
     );
+
+    /** Heights actually compared against the finalized chain; only these may be pruned. */
+    const verified = new Set<number>();
+
+    const compare = async (block: BlockHeader): Promise<void> => {
+      const record = tracked.get(block.number);
+      if (record && record.hash !== block.hash) {
+        await this.recordFallbackEvent({
+          type: 'finalized_mismatch',
+          blockNumber: block.number,
+          recordedSafeHash: record.hash,
+          observedHash: block.hash,
+          recordedAt: record.seenAt,
+          timestamp: block.timestamp,
+          note:
+            `Block ${block.number} finalized as ${block.hash} but was previously confirmed ` +
+            `as ${record.hash}. The confirmed block was reorged out.`,
+        });
+      }
+      verified.add(block.number);
+    };
 
     if (pending.length > 0) {
       const floor = Math.min(...pending);
       let cursor: BlockHeader = finalized;
       let steps = 0;
       while (true) {
-        const record = tracked.get(cursor.number);
-        if (record && record.hash !== cursor.hash) {
-          await this.recordReorg({
-            type: 'finalized_mismatch',
-            blockNumber: cursor.number,
-            recordedSafeHash: record.hash,
-            observedHash: cursor.hash,
-            recordedAt: record.seenAt,
-            timestamp: cursor.timestamp,
-            note:
-              `Block ${cursor.number} finalized as ${cursor.hash} but was previously confirmed ` +
-              `as ${record.hash}. The confirmed block was reorged out.`,
-          });
-        }
+        await compare(cursor);
         if (cursor.number <= floor) break;
         if (steps >= config.maxWalkBlocks) {
-          walkTruncatedCounter.inc({ client: this.client.id, phase: 'finalization' });
-          console.warn(
-            `[${this.client.id}] finalization sweep truncated at ${config.maxWalkBlocks} blocks; ` +
-              `heights ${floor}..${cursor.number - 1} were pruned without being verified`,
-          );
+          // The walk is bounded, and it descends from the tip — so what it misses is the
+          // bottom of the range. Those heights are picked up by number below rather than
+          // abandoned.
+          walkTruncatedCounter.inc({
+            client: this.client.id,
+            phase: 'finalization',
+          });
           break;
         }
         try {
@@ -266,18 +350,54 @@ class ClientPoller {
             `[${this.client.id}] finalization sweep stopped at ${cursor.number}: ` +
               `${error instanceof RpcError ? error.message : String(error)}`,
           );
-          return; // Leave the records in place so the next sweep retries them.
+          break; // Unverified heights stay in Redis and are retried on the next sweep.
         }
         steps += 1;
       }
+
+      // Whatever the walk did not reach is verified directly. Looking a finalized height up
+      // by number is authoritative because finalized blocks are immutable, so this closes
+      // the gap the walk's bound leaves rather than pruning across it unchecked.
+      const missed = pending.filter((number) => !verified.has(number)).sort((a, b) => b - a);
+      let lookups = 0;
+      for (const number of missed) {
+        if (lookups >= config.maxWalkBlocks) {
+          walkTruncatedCounter.inc({
+            client: this.client.id,
+            phase: 'finalization_by_number',
+          });
+          console.warn(
+            `[${this.client.id}] finalization sweep still has ${missed.length - lookups} ` +
+              `unverified heights after ${config.maxWalkBlocks} direct lookups; they are kept ` +
+              `for the next sweep`,
+          );
+          break;
+        }
+        try {
+          await compare(await getBlockByNumber(this.client.rpcUrl, number, config.rpcTimeoutMs));
+        } catch (error) {
+          rpcErrorCounter.inc({ client: this.client.id, tag: 'finalized' });
+          console.warn(
+            `[${this.client.id}] could not verify finalized height ${number}: ` +
+              `${error instanceof RpcError ? error.message : String(error)}`,
+          );
+        }
+        lookups += 1;
+      }
     }
 
-    await pruneSafeBlocksUpTo(this.client.id, finalized.number);
-    this.lastFinalizedNumber = finalized.number;
+    // Prune exactly what was checked. Anything left unverified stays until a later sweep
+    // reaches it, because its record is the only evidence a confirmed block was reorged out.
+    await pruneSafeBlocks(this.client.id, verified);
+
+    // Only advance the cursor past heights that were verified, so the ones left behind are
+    // still inside `pending` next time rather than filtered out as already-finalized.
+    const unverified = pending.filter((number) => !verified.has(number));
+    this.lastFinalizedNumber = unverified.length > 0 ? Math.min(...unverified) - 1 : finalized.number;
   }
 
-  private async recordReorg(input: {
-    type: ReorgType;
+  private async recordFallbackEvent(input: {
+    type: FallbackEventType;
     blockNumber: number;
     recordedSafeHash: string;
     observedHash: string;
@@ -287,10 +407,11 @@ class ClientPoller {
   }): Promise<void> {
     const detectedAt = nowSeconds();
     const slot = input.timestamp === null ? null : slotOfTimestamp(input.timestamp);
-    const event: ReorgEvent = {
+    const event: FallbackEvent = {
       id: `${this.client.id}-${input.type}-${input.blockNumber}-${detectedAt}`,
       client: this.client.id,
       type: input.type,
+      severity: severityOf(input.type),
       blockNumber: input.blockNumber,
       slot,
       epoch: slot === null ? null : epochOfSlot(slot),
@@ -300,22 +421,28 @@ class ClientPoller {
       detectedAt,
       note: input.note,
     };
-    await pushReorg(event);
-    reorgCounter.inc({ client: this.client.id, type: input.type });
-    announceReorg(
+    await pushFallbackEvent(event);
+    fallbackEventCounter.inc({
+      client: this.client.id,
+      type: input.type,
+      severity: event.severity,
+    });
+    announceFallbackEvent(
       {
         client: event.client,
         type: event.type,
+        severity: event.severity,
         blockNumber: event.blockNumber,
         recordedHash: event.recordedSafeHash,
         observedHash: event.observedHash,
         detectedAt: event.detectedAt,
       },
-      config.reorgAnnounceSeconds,
-      config.reorgAnnounceMax,
+      config.fallbackEventAnnounceSeconds,
+      config.fallbackEventAnnounceMax,
       detectedAt,
     );
-    console.error(`[REORG][${this.client.id}][${input.type}] ${input.note}`);
+    const tag = event.severity === 'critical' ? 'FCR-ALERT' : 'FCR-WITHDRAWN';
+    console.error(`[${tag}][${this.client.id}][${input.type}] ${input.note}`);
   }
 }
 
@@ -336,26 +463,27 @@ export class Monitor {
   }
 
   /**
-   * Re-publishes reorgs still inside their announcement window. Without this a
-   * restart during an incident would retire the alert while the reorg is still
+   * Re-publishes events still inside their announcement window. Without this a
+   * restart during an incident would retire the alert while the event is still
    * the thing you want to be told about.
    */
   private async restoreAnnouncements(): Promise<void> {
     const now = nowSeconds();
-    const recent = await getReorgs(config.reorgAnnounceMax);
+    const recent = await getFallbackEvents(config.fallbackEventAnnounceMax);
     for (const event of recent.reverse()) {
-      if (now - event.detectedAt >= config.reorgAnnounceSeconds) continue;
-      announceReorg(
+      if (now - event.detectedAt >= config.fallbackEventAnnounceSeconds) continue;
+      announceFallbackEvent(
         {
           client: event.client,
           type: event.type,
+          severity: event.severity,
           blockNumber: event.blockNumber,
           recordedHash: event.recordedSafeHash,
           observedHash: event.observedHash,
           detectedAt: event.detectedAt,
         },
-        config.reorgAnnounceSeconds,
-        config.reorgAnnounceMax,
+        config.fallbackEventAnnounceSeconds,
+        config.fallbackEventAnnounceMax,
         now,
       );
     }
@@ -376,7 +504,7 @@ export class Monitor {
     try {
       const snapshots = await Promise.all(this.pollers.map((poller) => poller.poll()));
       this.publishDivergence(snapshots);
-      sweepReorgAnnouncements(config.reorgAnnounceSeconds, nowSeconds());
+      sweepFallbackEventAnnouncements(config.fallbackEventAnnounceSeconds, nowSeconds());
     } catch (error) {
       console.error('[monitor] poll cycle failed:', error instanceof Error ? error.message : error);
     } finally {

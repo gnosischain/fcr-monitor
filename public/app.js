@@ -3,7 +3,7 @@
 const UI_REFRESH_MS = 3000;
 
 let state = null;
-let reorgs = null;
+let fallbackEvents = null;
 /** Server-minus-browser clock offset, so slot maths follows the server. */
 let clockOffset = 0;
 let activeTab = 'fcr';
@@ -187,7 +187,7 @@ function renderFcr() {
     banner.hidden = false;
     banner.textContent = `Clients disagree on the ${diverged
       .map((entry) => entry.tag)
-      .join(' and ')} block hash at the same height. Check the Reorg tab.`;
+      .join(' and ')} block hash at the same height. Check the Alerts tab.`;
   } else {
     banner.hidden = true;
   }
@@ -213,7 +213,7 @@ function renderFcr() {
   }
 }
 
-/* ---------- Reorg tab ---------- */
+/* ---------- Alerts tab ---------- */
 
 const TYPE_LABEL = {
   finalized_mismatch: 'finalized mismatch',
@@ -221,18 +221,21 @@ const TYPE_LABEL = {
   safe_regression: 'safe regression',
 };
 
-function reorgCard(event) {
-  const card = el('div', 'reorg-card');
+function fallbackEventCard(event) {
+  // `severity` is assigned server-side by `severityOf`; older records are backfilled on read,
+  // so the browser never needs its own copy of the type-to-severity rule.
+  const severity = event.severity === 'critical' ? 'critical' : 'warning';
+  const card = el('div', `fallback-event-card sev-${severity}`);
 
-  const head = el('div', 'reorg-head');
-  head.append(el('span', 'reorg-type', TYPE_LABEL[event.type] || event.type));
-  head.append(el('span', 'reorg-client', event.client));
-  head.append(el('span', 'reorg-when', formatUtc(event.detectedAt)));
+  const head = el('div', 'fallback-event-head');
+  head.append(el('span', `fallback-event-type sev-${severity}`, TYPE_LABEL[event.type] || event.type));
+  head.append(el('span', 'fallback-event-client', event.client));
+  head.append(el('span', 'fallback-event-when', formatUtc(event.detectedAt)));
   card.append(head);
 
-  card.append(el('div', 'reorg-note', event.note));
+  card.append(el('div', 'fallback-event-note', event.note));
 
-  const list = el('dl', 'reorg-hashes');
+  const list = el('dl', 'fallback-event-hashes');
   const add = (term, definition, className) => {
     list.append(el('dt', null, term));
     list.append(el('dd', className, definition));
@@ -252,53 +255,94 @@ function reorgCard(event) {
   return card;
 }
 
-function renderReorgs() {
-  if (!reorgs) return;
+function eventSection(title, subtitle, events, severity) {
+  const section = el('section', `event-section sev-${severity}`);
 
-  const badge = $('#reorg-badge');
-  badge.hidden = reorgs.reorgs.length === 0;
-  badge.textContent = String(reorgs.reorgs.length);
+  const head = el('div', 'event-section-head');
+  head.append(el('h2', 'event-section-title', title));
+  head.append(el('span', `event-section-count sev-${severity}`, String(events.length)));
+  section.append(head);
+  section.append(el('div', 'event-section-sub', subtitle));
 
-  const container = $('#reorg-content');
+  const list = el('div', 'fallback-event-list');
+  for (const event of events) list.append(fallbackEventCard(event));
+  section.append(list);
+
+  return section;
+}
+
+function renderFallbackEvents() {
+  if (!fallbackEvents) return;
+
+  const all = fallbackEvents.events;
+  const alerts = all.filter((event) => event.severity === 'critical');
+  const withdrawn = all.filter((event) => event.severity !== 'critical');
+
+  // The badge counts alerts only. A withdrawn confirmation is routine — the fast confirmation
+  // rule reverting to finality is specified behaviour — so counting those here would put a
+  // number that is almost always non-zero next to a tab labelled "Alerts".
+  const badge = $('#fallback-event-badge');
+  badge.hidden = alerts.length === 0;
+  badge.textContent = String(alerts.length);
+
+  const container = $('#fallback-event-content');
   container.textContent = '';
 
-  if (reorgs.reorgs.length === 0) {
+  if (alerts.length === 0) {
     const empty = el('div', 'empty-state');
     empty.append(el('div', 'empty-icon', '✓'));
-    empty.append(el('div', 'empty-title', `No reorg since ${formatUtc(reorgs.startedAt)}`));
+    empty.append(el('div', 'empty-title', `No confirmed block reorged since ${formatUtc(fallbackEvents.startedAt)}`));
     empty.append(
       el(
         'div',
         'empty-sub',
-        `monitoring for ${formatAge(reorgs.startedAt ? reorgs.now - reorgs.startedAt : null)}`,
+        `monitoring for ${formatAge(fallbackEvents.startedAt ? fallbackEvents.now - fallbackEvents.startedAt : null)}`,
       ),
     );
     container.append(empty);
-    return;
+  } else {
+    container.append(
+      eventSection(
+        'Alerts',
+        'A block confirmed by the fast confirmation rule was reorged out. This is the failure mode the rule promises will not happen.',
+        alerts,
+        'critical',
+      ),
+    );
   }
 
-  const list = el('div', 'reorg-list');
-  for (const event of reorgs.reorgs) list.append(reorgCard(event));
-  container.append(list);
+  if (withdrawn.length > 0) {
+    container.append(
+      eventSection(
+        'Confirmation withdrawn',
+        'The client took back a confirmation without any block being reorged — a specified fallback to finality, a syncing node, or an execution client restart. Recorded for diagnosis; not an alert.',
+        withdrawn,
+        'warning',
+      ),
+    );
+  }
 }
 
 /* ---------- polling ---------- */
 
 async function refresh() {
   try {
-    const [stateResponse, reorgResponse] = await Promise.all([fetch('/api/state'), fetch('/api/reorgs')]);
+    const [stateResponse, fallbackResponse] = await Promise.all([
+      fetch('/api/state'),
+      fetch('/api/fallback-events'),
+    ]);
     if (!stateResponse.ok) throw new Error(`/api/state returned ${stateResponse.status}`);
-    if (!reorgResponse.ok) throw new Error(`/api/reorgs returned ${reorgResponse.status}`);
+    if (!fallbackResponse.ok) throw new Error(`/api/fallback-events returned ${fallbackResponse.status}`);
 
     state = await stateResponse.json();
-    reorgs = await reorgResponse.json();
+    fallbackEvents = await fallbackResponse.json();
     clockOffset = state.now - Math.floor(Date.now() / 1000);
 
     $('#last-update').textContent = new Date().toISOString().slice(11, 19);
     $('#footer-status').textContent = 'connected';
 
     renderFcr();
-    renderReorgs();
+    renderFallbackEvents();
   } catch (error) {
     $('#footer-status').textContent = `disconnected: ${error.message}`;
   }

@@ -72,6 +72,17 @@ export const config = {
    */
   metricsPort: numeric('METRICS_PORT', 9100),
 
+  /**
+   * How stale a node's own head may be before a backwards `safe` move is blamed on the node
+   * rather than on consensus. A node that is syncing or has fallen behind stops advancing
+   * `latest`, and its consensus client pins the confirmed root to finality while it catches
+   * up — a withdrawal with nothing on chain behind it.
+   *
+   * Eight slots by default: comfortably past any realistic run of empty slots, which would
+   * otherwise age every node's head at once and look like all of them falling behind.
+   */
+  nodeBehindSeconds: numeric('NODE_BEHIND_SECONDS', 96),
+
   /** One Ethereum slot. Every poll re-reads safe/finalized/latest from both clients. */
   pollIntervalMs: numeric('POLL_INTERVAL_MS', 12_000),
   rpcTimeoutMs: numeric('RPC_TIMEOUT_MS', 5_000),
@@ -93,19 +104,19 @@ export const config = {
   /** How many epoch rows the slot grid renders. */
   epochsShown: numeric('EPOCHS_SHOWN', 4),
 
-  /** How many reorg events to retain in Redis. */
-  reorgHistory: numeric('REORG_HISTORY', 500),
+  /** How many fallback events to retain in Redis. */
+  fallbackEventHistory: numeric('FALLBACK_EVENT_HISTORY', 500),
 
   /**
-   * How long a detected reorg stays on `fcr_reorg_info`. The labels include
+   * How long a detected fallback event stays on `fcr_fallback_event_info`. The labels include
    * block hashes, so this is a cardinality budget as much as an alerting one:
    * it must comfortably exceed Prometheus's evaluation interval plus
    * Alertmanager's group_wait, and little more.
    */
-  reorgAnnounceSeconds: numeric('REORG_ANNOUNCE_SECONDS', 900),
+  fallbackEventAnnounceSeconds: numeric('FALLBACK_EVENT_ANNOUNCE_SECONDS', 900),
 
-  /** Ceiling on concurrently announced reorgs, so a chain split cannot flood the TSDB. */
-  reorgAnnounceMax: numeric('REORG_ANNOUNCE_MAX', 20),
+  /** Ceiling on concurrently announced fallback events, so a chain split cannot flood the TSDB. */
+  fallbackEventAnnounceMax: numeric('FALLBACK_EVENT_ANNOUNCE_MAX', 20),
 };
 
 export function slotOfTimestamp(timestamp: number): number {

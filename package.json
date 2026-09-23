@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Fast Confirmation Rule reorg monitor for Nimbus and Lodestar",
+  "description": "Fast Confirmation Rule fallback event monitor for Nimbus and Lodestar",
   "engines": {
     "node": ">=20"
   },
