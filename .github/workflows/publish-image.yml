@@ -23,8 +23,13 @@ on:
 permissions:
   contents: read
 
+# Pushes are grouped by commit, not by ref, so a release tag pushed straight
+# after a merge queues behind main's run for that commit instead of racing it
+# (the tag run needs main's image to exist). Pull requests keep grouping by
+# ref: their github.sha is a fresh merge commit per push, so grouping by it
+# would stop superseded PR runs being cancelled.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -137,28 +142,59 @@ jobs:
           username: oauth2accesstoken
           password: ${{ steps.auth.outputs.access_token }}
 
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-
-      - id: meta
-        name: compute tags
+      # Releases are promoted, never rebuilt. A rebuild of the same commit is not
+      # byte-identical (the provenance and SBOM attestations record the run), so
+      # it would be a different image from the one main built, scanned and
+      # signed, and pushing it as `sha-<commit>` would collide with main's
+      # immutable tag. So only main ever builds; a `v*` tag run finds main's
+      # image of its commit and adds the version tag to that exact digest.
+      #
+      # gcloud is preinstalled on the runner and the auth step above has already
+      # pointed it at the WIF credentials, so no setup-gcloud.
+      - id: existing
+        name: find the published image of this commit
         run: |
           set -euo pipefail
-          # Immutable, content-addressed tags only. Never `latest`: the
-          # Artifact Registry repo has immutable_tags = true, and the deployment
-          # pins a digest, so a moving tag would be both rejected and useless.
-          tags="${IMAGE}:sha-${GITHUB_SHA::12}"
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            tags="${tags},${IMAGE}:${GITHUB_REF#refs/tags/}"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            version="${GITHUB_REF#refs/tags/}"
+            # Git allows tag names like `v1$(x)` or `v9|v1.0.0`. Nothing here
+            # evaluates them, but a release tag has no reason to be anything but
+            # semver, so refuse the rest outright.
+            if [[ ! "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::${version} is not a semver release tag (vX.Y.Z or vX.Y.Z-pre)"
+              exit 1
+            fi
+            echo "version=${version}" >> "$GITHUB_OUTPUT"
           fi
-          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+          sha_tag="sha-${GITHUB_SHA::12}"
+          echo "sha_tag=${sha_tag}" >> "$GITHUB_OUTPUT"
+          # Empty means not published. An API error fails the step rather than
+          # being mistaken for "not published".
+          digest="$(gcloud artifacts docker tags list "${IMAGE}" \
+            --filter="tag~/tags/${sha_tag}\$" --format='value(version)')"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "${sha_tag}: ${digest:-not published}"
+
+      - name: refuse to release a commit main has not published
+        if: startsWith(github.ref, 'refs/tags/') && steps.existing.outputs.digest == ''
+        run: |
+          echo "::error::sha-${GITHUB_SHA::12} does not exist. A release must be a commit on main whose publish-image run has succeeded; tag one of those, or re-run this job once main's run for this commit is green."
+          exit 1
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        if: "!startsWith(github.ref, 'refs/tags/') && steps.existing.outputs.digest == ''"
 
       - id: build
+        if: "!startsWith(github.ref, 'refs/tags/') && steps.existing.outputs.digest == ''"
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: ${{ env.PLATFORMS }}
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          # Immutable, content-addressed tag only. Never `latest`: the Artifact
+          # Registry repo has immutable_tags = true, and the deployment pins a
+          # digest, so a moving tag would be both rejected and useless.
+          tags: ${{ env.IMAGE }}:${{ steps.existing.outputs.sha_tag }}
           # SLSA provenance and an SBOM, both attached to the image in AR.
           provenance: true
           sbom: true
@@ -170,25 +206,86 @@ jobs:
       # Keyless signature bound to this workflow's OIDC identity, so the infra
       # repo can verify where a digest came from before pinning it.
       - name: sign the image
+        if: "!startsWith(github.ref, 'refs/tags/') && steps.existing.outputs.digest == ''"
         run: cosign sign --yes "${IMAGE}@${{ steps.build.outputs.digest }}"
 
-      - name: summary
+      # Covers both a release and a re-run of main on an already-published
+      # commit. It proves main's own run of this workflow signed this digest at
+      # this exact commit, so nothing else that carries the sha- tag (a human
+      # push, say) can be released. An unsigned image is never re-signed here:
+      # that would vouch for bytes this run did not build.
+      - name: verify main signed the published image
+        if: steps.existing.outputs.digest != ''
+        env:
+          DIGEST: ${{ steps.existing.outputs.digest }}
         run: |
+          set -euo pipefail
+          if ! cosign verify "${IMAGE}@${DIGEST}" \
+              --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-image.yml@refs/heads/main" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-github-workflow-sha "${GITHUB_SHA}" >/dev/null; then
+            echo "::error::${IMAGE}@${DIGEST} is not signed by main's publish-image run at ${GITHUB_SHA}. It cannot be released; push a new commit to main."
+            exit 1
+          fi
+
+      # Adds a tag and nothing else, server side: the digest, its signature and
+      # its attestations stay exactly the ones main produced. Do not swap this
+      # for `docker buildx imagetools create` or a pull/tag/push, which can
+      # re-serialise the index into a new digest and orphan the signature.
+      - name: promote the published image
+        if: startsWith(github.ref, 'refs/tags/') && steps.existing.outputs.digest != ''
+        env:
+          DIGEST: ${{ steps.existing.outputs.digest }}
+          VERSION: ${{ steps.existing.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Exact match on the tag's last path segment, not a --filter regex, in
+          # which the dots of a version would be wildcards.
+          current="$(gcloud artifacts docker tags list "${IMAGE}" --format='value(tag,version)' \
+            | awk -F'\t' -v want="${VERSION}" '{ n = $1; sub(/.*\//, "", n) } n == want { print $2 }')"
+          # Re-runs: already on this digest is success. On another digest it is a
+          # real conflict, and immutable tags would refuse to move it anyway.
+          if [[ "${current}" == "${DIGEST}" ]]; then
+            echo "${VERSION} already points at ${DIGEST}"
+          elif [[ -n "${current}" ]]; then
+            echo "::error::${VERSION} already points at ${current}, not ${DIGEST}"
+            exit 1
+          else
+            gcloud artifacts docker tags add "${IMAGE}@${DIGEST}" "${IMAGE}:${VERSION}"
+          fi
+
+      - name: summary
+        env:
+          DIGEST: ${{ steps.existing.outputs.digest || steps.build.outputs.digest }}
+          VERSION: ${{ steps.existing.outputs.version }}
+          BUILT: ${{ steps.existing.outputs.digest == '' }}
+        run: |
+          label="${VERSION:-sha-${GITHUB_SHA::12}}"
           {
-            echo "### Image published"
+            if [[ -n "${VERSION}" ]]; then
+              echo "### Released \`${VERSION}\`"
+              echo
+              echo "No rebuild: \`${VERSION}\` was added to main's image of this commit (\`sha-${GITHUB_SHA::12}\`)."
+            elif [[ "${BUILT}" == true ]]; then
+              echo "### Image published"
+            else
+              echo "### Already published"
+              echo
+              echo "\`sha-${GITHUB_SHA::12}\` existed and is signed by main, so nothing was rebuilt."
+            fi
             echo
-            echo '```'
-            echo "${IMAGE}@${{ steps.build.outputs.digest }}"
-            echo '```'
-            echo
-            echo "Pin this in \`locals.tf\` of"
+            echo "To deploy, set this in \`terraform.tfvars\` of"
             echo "\`production/google/deployments/gnosis-chain/mainnet/tools/fcr-monitor/\`"
-            echo "in the \`infrastructure-gnosis\` repo, then open a PR."
-            echo
-            echo "Verify the signature with:"
+            echo "in the \`infrastructure-gnosis\` repo, then open a PR:"
+            echo '```hcl'
+            echo "image_tag = \"${label}@${DIGEST}\""
             echo '```'
-            echo "cosign verify ${IMAGE}@${{ steps.build.outputs.digest }} \\"
-            echo "  --certificate-identity-regexp 'https://github.com/gnosischain/fcr-monitor/.*' \\"
-            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo
+            echo "Verify the signature first with:"
+            echo '```'
+            echo "cosign verify ${IMAGE}@${DIGEST} \\"
+            echo "  --certificate-identity https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-image.yml@refs/heads/main \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
+            echo "  --certificate-github-workflow-sha ${GITHUB_SHA}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

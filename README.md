@@ -334,6 +334,14 @@ and pushed to Artifact Registry via Workload Identity Federation. The workflow
 never touches the cluster: deploying is a reviewed PR in the infra repo bumping a
 digest-pinned tag.
 
+Every push to `main` publishes `sha-<commit>`. To cut a release, create a GitHub
+Release (or push a `vX.Y.Z` tag) on a commit that is on `main`. The tag run never
+rebuilds: it checks that main's own run signed `sha-<commit>` and adds `vX.Y.Z` to
+that same digest, so the release is exactly the bytes main built, scanned and
+signed. A tag pushed while main's run for that commit is still going waits for it.
+Tagging a commit main never published fails, as does a tag that isn't semver.
+Registry tags are immutable, so a version can never be moved once published.
+
 ## Local development
 
 ```bash
