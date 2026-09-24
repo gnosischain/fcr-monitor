@@ -18,7 +18,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    # appendonly keeps tracked safe blocks and reorg history across restarts.
+    # appendonly keeps tracked safe blocks and fallback event history across restarts.
     command: ["redis-server", "--appendonly", "yes", "--save", ""]
     volumes:
       - redis-data:/data

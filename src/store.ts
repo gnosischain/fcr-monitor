@@ -1,6 +1,9 @@
 import { Redis } from 'ioredis';
 import { config } from './config.js';
 import type { BlockHeader } from './rpc.js';
+import { severityOf, type FallbackEventType, type Severity } from './events.js';
+
+export * from './events.js';
 
 export const redis = new Redis(config.redisUrl, {
   maxRetriesPerRequest: null,
@@ -18,12 +21,12 @@ export interface SafeRecord {
   seenAt: number;
 }
 
-export type ReorgType = 'finalized_mismatch' | 'safe_reorg' | 'safe_regression';
-
-export interface ReorgEvent {
+export interface FallbackEvent {
   id: string;
   client: string;
-  type: ReorgType;
+  type: FallbackEventType;
+  /** Derived from `type` via `severityOf`; carried on the record so consumers need no type list. */
+  severity: Severity;
   blockNumber: number;
   slot: number | null;
   epoch: number | null;
@@ -52,12 +55,12 @@ export interface ClientSnapshot {
 
 const safeKey = (client: string) => `fcr:safe:${client}`;
 const snapshotKey = (client: string) => `fcr:snapshot:${client}`;
-const REORGS_KEY = 'fcr:reorgs';
+const FALLBACK_EVENTS_KEY = 'fcr:fallback_events';
 const STARTED_AT_KEY = 'fcr:started_at';
 
 /**
  * Records the monitor's first-ever start. Deliberately SETNX so that the
- * "no reorg since X" claim survives container restarts — resetting it on every
+ * "no fallback event since X" claim survives container restarts — resetting it on every
  * boot would silently shorten the window the claim covers.
  */
 export async function initStartedAt(now: number): Promise<number> {
@@ -95,31 +98,41 @@ export async function getAllSafeBlocks(client: string): Promise<Map<number, Safe
   return result;
 }
 
-/** Drops every tracked safe block at or below `blockNumber` — they are finalized and checked. */
-export async function pruneSafeBlocksUpTo(client: string, blockNumber: number): Promise<number> {
-  const tracked = await redis.hkeys(safeKey(client));
-  const stale = tracked.filter((key) => Number(key) <= blockNumber);
-  if (stale.length === 0) return 0;
-  await redis.hdel(safeKey(client), ...stale);
-  return stale.length;
+/**
+ * Drops exactly the heights given — the ones actually compared against the finalized chain.
+ *
+ * Deliberately a set rather than a range. A finalization sweep verifies downwards from the
+ * finalized tip, so when it is cut short the heights it missed are the *lowest* ones; a
+ * range prune would delete precisely those, discarding the only evidence that a confirmed
+ * block at one of them was reorged out.
+ */
+export async function pruneSafeBlocks(client: string, blockNumbers: Iterable<number>): Promise<number> {
+  const fields = [...blockNumbers].map(String);
+  if (fields.length === 0) return 0;
+  await redis.hdel(safeKey(client), ...fields);
+  return fields.length;
 }
 
 export async function countSafeBlocks(client: string): Promise<number> {
   return redis.hlen(safeKey(client));
 }
 
-export async function pushReorg(event: ReorgEvent): Promise<void> {
-  await redis.lpush(REORGS_KEY, JSON.stringify(event));
-  await redis.ltrim(REORGS_KEY, 0, config.reorgHistory - 1);
+export async function pushFallbackEvent(event: FallbackEvent): Promise<void> {
+  await redis.lpush(FALLBACK_EVENTS_KEY, JSON.stringify(event));
+  await redis.ltrim(FALLBACK_EVENTS_KEY, 0, config.fallbackEventHistory - 1);
 }
 
-export async function getReorgs(limit = config.reorgHistory): Promise<ReorgEvent[]> {
-  const raw = await redis.lrange(REORGS_KEY, 0, limit - 1);
-  return raw.map((entry) => JSON.parse(entry) as ReorgEvent);
+export async function getFallbackEvents(limit = config.fallbackEventHistory): Promise<FallbackEvent[]> {
+  const raw = await redis.lrange(FALLBACK_EVENTS_KEY, 0, limit - 1);
+  return raw.map((entry) => {
+    const event = JSON.parse(entry) as FallbackEvent;
+    // Records written before `severity` existed are still in the history window.
+    return event.severity ? event : { ...event, severity: severityOf(event.type) };
+  });
 }
 
-export async function countReorgs(): Promise<number> {
-  return redis.llen(REORGS_KEY);
+export async function countFallbackEvents(): Promise<number> {
+  return redis.llen(FALLBACK_EVENTS_KEY);
 }
 
 export async function saveSnapshot(snapshot: ClientSnapshot): Promise<void> {

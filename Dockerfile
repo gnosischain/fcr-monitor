@@ -1,7 +1,7 @@
 # Base image pinned by digest, not by the floating `node:22-alpine` tag, so
 # rebuilding an old commit produces the same image. Bump with:
 #   docker buildx imagetools inspect node:22-alpine --format '{{.Manifest.Digest}}'
-ARG NODE_IMAGE=node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+ARG NODE_IMAGE=node:22-alpine@sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85
 
 # ---------------------------------------------------------------------------
 # build — compiles TypeScript. `tsc` is also the quality gate for this repo:

@@ -75,6 +75,17 @@ export async function getBlockByTag(url: string, tag: BlockTag, timeoutMs: numbe
   return toHeader(await call<RawBlock>(url, 'eth_getBlockByNumber', [tag, false], timeoutMs));
 }
 
+/**
+ * Look a block up by height. Only sound for heights at or below the finalized block: those
+ * are immutable, so the number identifies exactly one block. Above finality the answer
+ * depends on what is canonical at call time, which is why the safe backfill walks
+ * `parentHash` instead.
+ */
+export async function getBlockByNumber(url: string, blockNumber: number, timeoutMs: number): Promise<BlockHeader> {
+  const tag = `0x${blockNumber.toString(16)}`;
+  return toHeader(await call<RawBlock>(url, 'eth_getBlockByNumber', [tag, false], timeoutMs));
+}
+
 export async function getBlockByHash(url: string, hash: string, timeoutMs: number): Promise<BlockHeader> {
   return toHeader(await call<RawBlock>(url, 'eth_getBlockByHash', [hash, false], timeoutMs));
 }

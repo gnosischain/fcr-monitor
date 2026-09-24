@@ -1,7 +1,7 @@
 {
   "uid": "fcr-monitor",
   "title": "FCR Monitor",
-  "tags": ["ethereum", "fcr", "reorg"],
+  "tags": ["ethereum", "fcr", "fallback-events"],
   "timezone": "utc",
   "editable": false,
   "schemaVersion": 39,
@@ -14,13 +14,13 @@
     {
       "id": 1,
       "type": "stat",
-      "title": "Reorgs detected",
+      "title": "Fallback events detected",
       "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(fcr_reorgs_total)",
+          "expr": "sum(fcr_fallback_events_total)",
           "legendFormat": "total",
           "instant": true
         }
@@ -211,13 +211,13 @@
     {
       "id": 8,
       "type": "timeseries",
-      "title": "Reorg events",
+      "title": "Fallback events",
       "gridPos": { "h": 7, "w": 8, "x": 0, "y": 17 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
           "refId": "A",
-          "expr": "increase(fcr_reorgs_total[1h])",
+          "expr": "increase(fcr_fallback_events_total[1h])",
           "legendFormat": "{{client}} · {{type}}"
         }
       ],

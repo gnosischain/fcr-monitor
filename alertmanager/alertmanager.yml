@@ -6,16 +6,16 @@ global:
 
 route:
   # Default is to notify nobody. Every rule in prometheus/alerts.yml still
-  # evaluates and is visible at :9090/alerts, but only the reorg alert is
+  # evaluates and is visible at :9090/alerts, but only the confirmed-block-reorged alert is
   # routed anywhere. Silence here is deliberate, not a missing receiver.
   receiver: blackhole
 
   routes:
-    # Reorgs are discrete events, not conditions that clear. Group by block so
-    # two reorged blocks never collapse into one message, and do not re-notify:
+    # Fallback events are discrete, not conditions that clear. Group by block so
+    # two offending blocks never collapse into one message, and do not re-notify:
     # the block is already named in the first message.
-    - matchers: [alertname="FcrReorgDetected"]
-      receiver: slack-fcr-reorg
+    - matchers: [alertname="FcrConfirmedBlockReorged"]
+      receiver: slack-fcr-confirmed-block-reorged
       group_by: ['client', 'block_number']
       group_wait: 10s
       group_interval: 5m
@@ -24,18 +24,18 @@ route:
 receivers:
   - name: blackhole
 
-  - name: slack-fcr-reorg
+  - name: slack-fcr-confirmed-block-reorged
     slack_configs:
       # Modern Slack webhooks are bound to the channel they were created for and
       # ignore this field, but Alertmanager still requires it to be set.
       - channel: '#fcr-alerts'
         # No resolved notification. The announcement expiring means the alerting
-        # window closed, not that the reorg was undone — a ✅ would misread.
+        # window closed, not that the event was undone — a ✅ would misread.
         send_resolved: false
-        title: '🔴 Reorg past the fast confirmation rule — {{ .CommonLabels.client }}'
+        title: '🔴 Confirmed block reorged out — {{ .CommonLabels.client }}'
         text: |-
           {{ range .Alerts }}{{ .Annotations.summary }}
           • *block* `{{ .Labels.block_number }}`
-          • *recorded* `{{ .Labels.recorded_hash }}`
+          • *recorded* `{{ .Labels.recorded_safe_hash }}`
           • *actual* `{{ .Labels.observed_hash }}`
           {{ end }}

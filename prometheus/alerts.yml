@@ -1,20 +1,42 @@
 groups:
   - name: fcr
     rules:
-      # Fires per offending block rather than per client, so the block number and
-      # both hashes ride the alert's labels into the notification. Supersedes an
-      # earlier rule on increase(fcr_reorgs_total) — same condition, no detail.
-      - alert: FcrReorgDetected
-        expr: fcr_reorg_info == 1
+      # Two rules, split by the `severity` label the monitor puts on the series.
+      # `severityOf` in src/events.ts is the single definition; nothing here repeats it.
+      #
+      # Only a hash changing at a height already recorded as safe proves a confirmed block
+      # was lost. The `safe` tag moving backwards does not: the fast confirmation rule
+      # reverts to the finalized checkpoint by design, and a syncing node or an execution
+      # client restart produces the same move with nothing on chain behind it.
+      #
+      # Fires per offending block rather than per client, so the block number and both
+      # hashes ride the alert's labels into the notification.
+      - alert: FcrConfirmedBlockReorged
+        expr: fcr_fallback_event_info{severity="critical"} == 1
         for: 0m
         labels:
           severity: critical
         annotations:
           summary: "{{ $labels.type }} on {{ $labels.client }} at block {{ $labels.block_number }}"
           description: >-
-            Block {{ $labels.block_number }} was confirmed as {{ $labels.recorded_hash }}
-            and is now {{ $labels.observed_hash }}.
-            See the Reorg tab on the monitor.
+            Block {{ $labels.block_number }} was confirmed as {{ $labels.recorded_safe_hash }}
+            and is now {{ $labels.observed_hash }}. A block confirmed by the fast
+            confirmation rule was reorged out. See the Alerts tab on the monitor.
+
+      # Evaluates and is visible at :9090/alerts, but is not routed to a notifier.
+      # Useful signal, not an incident: one client withdrawing while the other does not,
+      # with both still up, is the signature of a struggling execution client.
+      - alert: FcrConfirmationWithdrawn
+        expr: fcr_fallback_event_info{severity="warning"} == 1
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.client }} withdrew its confirmation at block {{ $labels.block_number }}"
+          description: >-
+            The safe tag on {{ $labels.client }} moved backwards. No block was reorged --
+            the fast confirmation rule reverted to finality, or the node is syncing, or its
+            execution client restarted. Recorded for diagnosis only.
 
       - alert: FcrClientDown
         expr: fcr_client_up == 0
