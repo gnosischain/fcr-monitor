@@ -4,6 +4,7 @@ const UI_REFRESH_MS = 3000;
 
 let state = null;
 let fallbackEvents = null;
+let analytics = null;
 /** Server-minus-browser clock offset, so slot maths follows the server. */
 let clockOffset = 0;
 let activeTab = 'fcr';
@@ -213,6 +214,97 @@ function renderFcr() {
   }
 }
 
+/* ---------- analytics tiles ---------- */
+
+const DIRECTION_LABEL = { eth_to_gc: 'ETH → GC', gc_to_eth: 'GC → ETH' };
+const BRIDGE_LABEL = { XDAI: 'xDAI bridge', AMB: 'AMB / OmniBridge' };
+const DIRECTION_NOTE = {
+  eth_to_gc: 'UserRequestForAffirmation → AffirmationCompleted',
+  gc_to_eth: 'UserRequestForSignature → CollectedSignatures',
+};
+
+function formatWindow(seconds) {
+  return seconds % 3600 === 0 ? `${seconds / 3600}h` : `${Math.round(seconds / 60)}m`;
+}
+
+function statTile({ title, subtitle, stat, footer, stale, showRange }) {
+  const tile = el('div', `stat-tile${stale ? ' stale' : ''}`);
+  const head = el('div', 'stat-head');
+  head.append(el('span', 'stat-title', title));
+  head.append(el('span', 'stat-subtitle', subtitle));
+  tile.append(head);
+
+  const body = el('div', 'stat-body');
+  const value = el('span', 'stat-value', stat && stat.count > 0 ? formatAge(stat.median) : '—');
+  value.title = 'median';
+  body.append(value);
+  body.append(el('span', 'stat-unit', 'median'));
+  tile.append(body);
+
+  if (showRange) {
+    const seconds = (value) => (typeof value === 'number' ? value : '—');
+    const range = `max ${seconds(stat?.max)} s, min ${seconds(stat?.min)} s`;
+    tile.append(el('div', 'stat-range', range));
+  }
+
+  tile.append(el('div', 'stat-footer', footer));
+  return tile;
+}
+
+function renderAnalytics() {
+  const container = $('#analytics');
+  if (!analytics) return;
+  container.textContent = '';
+
+  const bridging = analytics.bridging;
+  let footer;
+  let stale = false;
+  if (!bridging) {
+    footer = 'indexer not configured';
+    stale = true;
+  } else if (!bridging.fetchedAt) {
+    footer = bridging.lastError ? 'indexer unavailable, no data yet' : 'waiting for first fetch';
+    stale = true;
+  } else {
+    const age = serverNow() - bridging.fetchedAt;
+    // Stale once a fetch has failed or two intervals have passed without a success.
+    stale = Boolean(bridging.lastError) || age > analytics.intervalSeconds * 2;
+    // Until a full window has passed since ANALYTICS_START_TIMESTAMP, the figures cover less than it.
+    const floored = bridging.since && bridging.since > bridging.fetchedAt - bridging.windowSeconds;
+    const scope = floored
+      ? `since ${new Date(bridging.since * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC`
+      : `${formatWindow(bridging.windowSeconds)} window`;
+    footer = `${scope} · ${stale ? 'stale, data ' : ''}${formatAge(age)} ago`;
+  }
+
+  for (const direction of ['eth_to_gc', 'gc_to_eth']) {
+    for (const bridgeType of ['XDAI', 'AMB']) {
+      const stat = bridging?.stats?.find((entry) => entry.direction === direction && entry.bridgeType === bridgeType);
+      const tile = statTile({
+        title: DIRECTION_LABEL[direction],
+        subtitle: BRIDGE_LABEL[bridgeType],
+        stat,
+        footer,
+        stale,
+        showRange: true,
+      });
+      tile.title = DIRECTION_NOTE[direction];
+      container.append(tile);
+    }
+  }
+
+  const safe = analytics.safeConfirmation;
+  container.append(
+    statTile({
+      title: 'Safe confirmation',
+      subtitle: 'head → safe',
+      stat: safe,
+      footer: `${formatWindow(safe.windowSeconds)} window · ${safe.clients.join(', ') || 'no clients'}`,
+      stale: safe.count === 0,
+    }),
+  );
+}
+
 /* ---------- Alerts tab ---------- */
 
 const TYPE_LABEL = {
@@ -346,6 +438,16 @@ async function refresh() {
   } catch (error) {
     $('#footer-status').textContent = `disconnected: ${error.message}`;
   }
+
+  // Separate from the main refresh so an analytics problem never blanks the FCR view.
+  try {
+    const response = await fetch('/api/analytics');
+    if (!response.ok) throw new Error(`/api/analytics returned ${response.status}`);
+    analytics = await response.json();
+  } catch (error) {
+    console.warn(error);
+  }
+  renderAnalytics();
 }
 
 function setupTabs() {

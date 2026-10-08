@@ -1,3 +1,4 @@
+import { AnalyticsFetcher } from './analytics.js';
 import { config } from './config.js';
 import { initClientMetrics } from './metrics.js';
 import { Monitor } from './poller.js';
@@ -35,6 +36,9 @@ async function main(): Promise<void> {
   const monitor = new Monitor(config.clients);
   await monitor.start();
 
+  const analytics = new AnalyticsFetcher();
+  await analytics.start();
+
   const server = createServer().listen(config.port, config.host, () => {
     console.log(`[fcr-monitor] listening on ${config.host}:${config.port}`);
   });
@@ -47,6 +51,7 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string) => {
     console.log(`[fcr-monitor] ${signal} received, shutting down`);
     monitor.stop();
+    analytics.stop();
     server.close();
     metricsServer.close();
     await redis.quit().catch(() => undefined);

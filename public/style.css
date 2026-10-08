@@ -235,6 +235,90 @@ main {
   color: var(--text-faint);
 }
 
+/* ---------- analytics tiles ---------- */
+
+.analytics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.analytics:empty {
+  display: none;
+}
+
+.stat-tile {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  min-width: 0;
+}
+
+.stat-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.stat-title {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.stat-subtitle {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.stat-body {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.stat-value {
+  font-family: var(--mono);
+  font-size: 26px;
+  font-weight: 600;
+  color: var(--green);
+}
+
+.stat-unit {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+/* Same face as the footer, so it reads as detail beneath the headline figure. */
+.stat-range {
+  margin-top: 4px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.stat-footer {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-soft);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.stat-tile.stale .stat-value {
+  color: var(--text-dim);
+}
+
+.stat-tile.stale .stat-footer {
+  color: var(--orange);
+}
+
 /* ---------- planned clients ---------- */
 
 .planned {

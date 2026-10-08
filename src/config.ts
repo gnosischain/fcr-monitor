@@ -117,6 +117,34 @@ export const config = {
 
   /** Ceiling on concurrently announced fallback events, so a chain split cannot flood the TSDB. */
   fallbackEventAnnounceMax: numeric('FALLBACK_EVENT_ANNOUNCE_MAX', 20),
+
+  /**
+   * Bridging-time analytics, read from the Envio indexer behind the Bridge Explorer.
+   * Server-side only: neither value is ever sent to the browser, which sees only the
+   * computed figures. Leaving the URL unset disables the fetcher.
+   */
+  envio: {
+    url: process.env.ENVIO_INDEXER_URL ?? '',
+    token: process.env.ENVIO_INDEXER_TOKEN ?? '',
+    timeoutMs: numeric('ENVIO_TIMEOUT_MS', 15_000),
+    /** Hard ceiling on a response body. The indexer is outside our control. */
+    maxResponseBytes: numeric('ENVIO_MAX_RESPONSE_BYTES', 10 * 1024 * 1024),
+  },
+
+  /** Bridging times move over minutes; a slot-rate poll would only load someone else's indexer. */
+  analyticsIntervalMs: numeric('ANALYTICS_INTERVAL_MS', 60_000),
+
+  /** Transfers initiated within this window, and completed, feed the bridging-time figures. */
+  analyticsWindowHours: numeric('ANALYTICS_WINDOW_HOURS', 24),
+
+  /**
+   * Transfers initiated before this unix timestamp are never counted, whatever the window.
+   * Until a full window has passed since it, the figures cover only the time since.
+   */
+  analyticsStartTimestamp: numeric('ANALYTICS_START_TIMESTAMP', 1_791_410_400),
+
+  /** Window over which the head-to-safe gap is summarised. */
+  safeGapWindowSeconds: numeric('SAFE_GAP_WINDOW_SECONDS', 3600),
 };
 
 export function slotOfTimestamp(timestamp: number): number {
