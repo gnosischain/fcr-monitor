@@ -143,3 +143,35 @@ export async function loadSnapshot(client: string): Promise<ClientSnapshot | nul
   const raw = await redis.get(snapshotKey(client));
   return raw ? (JSON.parse(raw) as ClientSnapshot) : null;
 }
+
+const ANALYTICS_KEY = 'fcr:analytics';
+const SAFE_GAP_KEY = 'fcr:safe_gap';
+
+/** One poll's head-to-safe gap, averaged over the clients that answered it. */
+export interface SafeGapSample {
+  /** Unix seconds of the poll. */
+  at: number;
+  seconds: number;
+  clients: string[];
+}
+
+/** Stored as an opaque blob: the shape belongs to analytics.ts. */
+export async function saveAnalytics(value: unknown): Promise<void> {
+  await redis.set(ANALYTICS_KEY, JSON.stringify(value));
+}
+
+export async function loadAnalytics<T>(): Promise<T | null> {
+  const raw = await redis.get(ANALYTICS_KEY);
+  return raw ? (JSON.parse(raw) as T) : null;
+}
+
+/** Capped by count as well as filtered by age on read, so a burst of polls cannot grow it unbounded. */
+export async function pushSafeGap(sample: SafeGapSample, maxSamples: number): Promise<void> {
+  await redis.lpush(SAFE_GAP_KEY, JSON.stringify(sample));
+  await redis.ltrim(SAFE_GAP_KEY, 0, maxSamples - 1);
+}
+
+export async function getSafeGaps(since: number): Promise<SafeGapSample[]> {
+  const raw = await redis.lrange(SAFE_GAP_KEY, 0, -1);
+  return raw.map((entry) => JSON.parse(entry) as SafeGapSample).filter((sample) => sample.at >= since);
+}

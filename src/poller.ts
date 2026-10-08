@@ -1,3 +1,4 @@
+import { recordSafeGap } from './analytics.js';
 import { config, epochOfSlot, slotOfTimestamp, type ClientConfig } from './config.js';
 import {
   getBlockByHash,
@@ -504,6 +505,7 @@ export class Monitor {
     try {
       const snapshots = await Promise.all(this.pollers.map((poller) => poller.poll()));
       this.publishDivergence(snapshots);
+      await recordSafeGap(snapshots, nowSeconds());
       sweepFallbackEventAnnouncements(config.fallbackEventAnnounceSeconds, nowSeconds());
     } catch (error) {
       console.error('[monitor] poll cycle failed:', error instanceof Error ? error.message : error);

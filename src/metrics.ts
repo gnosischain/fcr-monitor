@@ -189,3 +189,29 @@ export function initClientMetrics(clients: string[]): void {
   divergenceGauge.set({ tag: 'safe' }, 0);
   divergenceGauge.set({ tag: 'finalized' }, 0);
 }
+
+export const bridgeTimeGauge = new Gauge({
+  name: 'fcr_bridge_time_seconds',
+  help: 'Bridging time over the analytics window, by direction, bridge and statistic (median, p90, min, max)',
+  labelNames: ['direction', 'bridge', 'stat'] as const,
+  registers: [registry],
+});
+
+export const bridgeSamplesGauge = new Gauge({
+  name: 'fcr_bridge_samples',
+  help: 'Completed transfers behind fcr_bridge_time_seconds',
+  labelNames: ['direction', 'bridge'] as const,
+  registers: [registry],
+});
+
+export const analyticsLastSuccessGauge = new Gauge({
+  name: 'fcr_analytics_last_success_timestamp_seconds',
+  help: 'Unix timestamp of the last successful fetch from the Envio indexer',
+  registers: [registry],
+});
+
+export const analyticsErrorCounter = new Counter({
+  name: 'fcr_analytics_errors_total',
+  help: 'Failed fetches from the Envio indexer',
+  registers: [registry],
+});

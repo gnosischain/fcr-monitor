@@ -126,9 +126,56 @@ the finalized block and the head:
 | `fcr:snapshot:{client}` | string | latest D1/D2/D3 snapshot, also used to restore cursors after a restart |
 | `fcr:fallback_events` | list | fallback events, capped at `FALLBACK_EVENT_HISTORY` |
 | `fcr:started_at` | string | first-ever start, written with `SETNX` |
+| `fcr:analytics` | string | last bridging-time figures from Envio, with `fetchedAt` and `lastError` |
+| `fcr:safe_gap` | list | per-poll head-to-safe gap, capped to `SAFE_GAP_WINDOW_SECONDS` |
 
 `fcr:started_at` uses `SETNX` deliberately: resetting it on each boot would
 silently shorten the window the "no fallback event since X" claim covers.
+
+---
+
+## Analytics
+
+The FCR tab opens with a row of tiles, each showing the **median** over a
+rolling window. The bridging tiles also show the fastest and slowest transfer
+in that window, in seconds. The p90 and sample count are not shown on the page but are
+exported as metrics (`fcr_bridge_time_seconds{stat="p90"}`, `fcr_bridge_samples`):
+
+| tile | from | to | window |
+|---|---|---|---|
+| ETH → GC, per bridge (xDAI, AMB) | `UserRequestForAffirmation` (Ethereum) | `AffirmationCompleted` (Gnosis) | transfers initiated in the last 24h |
+| GC → ETH, per bridge (xDAI, AMB) | `UserRequestForSignature` (Gnosis) | `CollectedSignatures` (Gnosis) | transfers initiated in the last 24h |
+| Safe confirmation | `safe` block timestamp | `latest` block timestamp | last hour of polls, averaged over online clients |
+
+Bridging times come from the Envio indexer behind the Bridge Explorer, fetched
+every minute (`ANALYTICS_INTERVAL_MS`). Transfers initiated before
+`ANALYTICS_START_TIMESTAMP` (default `1791410400`, 2026-10-07 22:00 UTC) are never
+counted, so until a full window has passed since then the tiles cover only the
+time since, and say so in their footer. Two things are easy to get wrong:
+
+- **GC → ETH does not end at `execution`.** That is the user's claim on Ethereum,
+  which can come days later or never. The indexer stores no `CollectedSignatures`
+  timestamp, but the signature that reaches the threshold emits it in the same
+  transaction and is always the last one, so the latest validation is used.
+- **Only finished transfers count.** In-flight ones are absent until they finish,
+  so a slowdown that is happening right now shows up only as transfers
+  complete. `ERROR` rows are excluded in both directions.
+
+The indexer's schema, the event-to-field mapping and the remaining edge cases
+are in [`docs/envio-api-knowledge.md`](docs/envio-api-knowledge.md).
+
+Each figure is the median rather than the mean, because one transfer stuck
+behind validator downtime would otherwise move it by minutes. A median over a
+handful of transfers is noise, not signal; check `fcr_bridge_samples` before
+reading much into a quiet bridge.
+
+**The indexer is outside our control, so the browser never reaches it.** The
+server fetches on its own timer with a fixed query, and writes the figures to
+Redis. `/api/analytics` serves them from there, so a page view cannot trigger an
+upstream request and no request parameter ever reaches the indexer. The
+responses are treated as untrusted: they have a timeout and a size cap, and
+implausible durations are dropped. If the indexer is down, the last good
+figures stay on screen, marked stale with their age.
 
 ---
 
@@ -208,7 +255,7 @@ docker compose exec alertmanager amtool --alertmanager.url=http://localhost:9093
 ## Keeping the execution RPC private
 
 The browser never talks to the execution client. The server polls it, and the
-page only ever fetches `/api/state` and `/api/fallback-events`, which return
+page only ever fetches `/api/state`, `/api/fallback-events` and `/api/analytics`, which return
 block numbers, hashes and event records — data that is already public on chain. The
 RPC URL and any credentials stay in the server process.
 
@@ -250,6 +297,10 @@ Beyond that:
 | `fcr_tracked_safe_blocks` | `client` | safe blocks awaiting finalization |
 | `fcr_walk_truncated_total` | `client`, `phase` | coverage gaps from hitting `MAX_WALK_BLOCKS` |
 | `fcr_suppressed_regressions_total` | `client`, `reason` | regressions attributed to the node (`el_unavailable`, `node_behind`) and not recorded |
+| `fcr_bridge_time_seconds` | `direction`, `bridge`, `stat` | bridging time over the analytics window (`median`, `p90`, `min`, `max`) |
+| `fcr_bridge_samples` | `direction`, `bridge` | completed transfers behind those figures |
+| `fcr_analytics_last_success_timestamp_seconds` | | last successful indexer fetch |
+| `fcr_analytics_errors_total` | | failed indexer fetches |
 
 `/metrics` is on a **separate listener** from the dashboard, not a path on port
 3000. It is unauthenticated and also carries Node process/GC/event-loop
@@ -333,6 +384,13 @@ Images are built by [`.github/workflows/publish-image.yml`](.github/workflows/pu
 and pushed to Artifact Registry via Workload Identity Federation. The workflow
 never touches the cluster: deploying is a reviewed PR in the infra repo bumping a
 digest-pinned tag.
+
+The bridging-time tiles need two values on the Deployment, both from the
+infra repo rather than the image: `ENVIO_INDEXER_URL`, and `ENVIO_INDEXER_TOKEN`
+from a Kubernetes Secret, never a plain env value or ConfigMap. If the
+namespace restricts egress, the pod also needs HTTPS (and DNS) to the indexer
+host. Without the URL the monitor still runs, logs that analytics are disabled,
+and the tiles say "indexer not configured".
 
 Every push to `main` publishes `sha-<commit>`. To cut a release, create a GitHub
 Release (or push a `vX.Y.Z` tag) on a commit that is on `main`. The tag run never

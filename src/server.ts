@@ -1,9 +1,18 @@
 import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { safeGapSummary, type BridgingAnalytics } from './analytics.js';
 import { config, epochOfSlot, slotOfTimestamp } from './config.js';
 import { registry } from './metrics.js';
-import { countFallbackEvents, getFallbackEvents, getStartedAt, loadSnapshot, redis, type ClientSnapshot } from './store.js';
+import {
+  countFallbackEvents,
+  getFallbackEvents,
+  getStartedAt,
+  loadAnalytics,
+  loadSnapshot,
+  redis,
+  type ClientSnapshot,
+} from './store.js';
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
@@ -91,6 +100,25 @@ export function createServer() {
         // Split here rather than in the browser so the severity rule lives in one place.
         alertCount: events.filter((event) => event.severity === 'critical').length,
         withdrawnCount: events.filter((event) => event.severity === 'warning').length,
+      });
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  /**
+   * Served from Redis only. Nothing here reaches the Envio indexer, so a page view can
+   * never cause an upstream request, and the indexer URL and token never leave the server.
+   */
+  app.get('/api/analytics', async (_req, res) => {
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      const bridging = await loadAnalytics<BridgingAnalytics>();
+      res.json({
+        now,
+        bridging: config.envio.url ? bridging : null,
+        intervalSeconds: config.analyticsIntervalMs / 1000,
+        safeConfirmation: await safeGapSummary(now),
       });
     } catch (error) {
       res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
